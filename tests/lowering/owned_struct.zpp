@@ -1,0 +1,5 @@
+const std = @import("std");
+
+owned struct Foo {
+    n: u32,
+}

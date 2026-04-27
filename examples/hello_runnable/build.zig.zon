@@ -1,0 +1,8 @@
+.{
+    .name = .hello_runnable,
+    .version = "0.0.0",
+    .fingerprint = 0xfff2858a93f1db4e,
+    .minimum_zig_version = "0.15.0",
+    .dependencies = .{},
+    .paths = .{ "build.zig", "build.zig.zon", ".zpp-out" },
+}

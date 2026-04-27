@@ -1,0 +1,2 @@
+fn emit(w: impl Writer, msg: []const u8) !void {
+}

@@ -1,0 +1,35 @@
+//! hello_trait.zpp — minimal Zig++ example: trait declaration, static-dispatch
+//! `impl Trait` parameter, `using` RAII, and an owned struct.
+
+const std = @import("std");
+const zpp = @import("zpp");
+
+trait Writer {
+    fn write(self, bytes: []const u8) !usize;
+}
+
+owned struct FileWriter {
+    file: std.fs.File,
+
+    pub fn init(path: []const u8) !FileWriter {
+        const f = try std.fs.cwd().createFile(path, .{ .truncate = true });
+        return .{ .file = f };
+    }
+
+    pub fn deinit(self: *FileWriter) void {
+        self.file.close();
+    }
+
+    pub fn write(self: *FileWriter, bytes: []const u8) !usize {
+        return try self.file.write(bytes);
+    }
+}
+
+fn emit(w: impl Writer, msg: []const u8) !void {
+    _ = try w.write(msg);
+}
+
+pub fn main() !void {
+    using writer = try FileWriter.init("log.txt");
+    try emit(&writer, "hello zig++\n");
+}

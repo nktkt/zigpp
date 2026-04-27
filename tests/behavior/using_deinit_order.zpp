@@ -1,0 +1,17 @@
+// expected stderr: B deinit\nA deinit\n
+const std = @import("std");
+
+const Tag = struct {
+    name: []const u8,
+
+    fn deinit(self: *Tag) void {
+        std.debug.print("{s} deinit\n", .{self.name});
+    }
+};
+
+pub fn main() !void {
+    using a = Tag{ .name = "A" };
+    using b = Tag{ .name = "B" };
+    _ = a;
+    _ = b;
+}

@@ -1,0 +1,205 @@
+//! Main CLI driver for the `zpp` binary; parses argv and dispatches to
+//! subcommand handlers that drive the Zig++ pipeline (parse, sema, lower,
+//! and the auxiliary `fmt`, `doc`, `lsp`, `migrate` tools).
+
+const std = @import("std");
+
+const zpp_lib = @import("zpp_lib");
+const parser = zpp_lib.parser;
+const sema = zpp_lib.sema;
+const lower_to_zig = zpp_lib.lower_to_zig;
+const diagnostics = zpp_lib.diagnostics;
+const ast = zpp_lib.ast;
+const project = zpp_lib.project;
+
+const zpp_fmt = @import("zpp_fmt.zig");
+const zpp_lsp = @import("zpp_lsp.zig");
+const zpp_doc = @import("zpp_doc.zig");
+const zpp_migrate = @import("zpp_migrate.zig");
+
+const version_text = "zpp 0.0.1 (Zig++ Design Draft v0.1)\n";
+
+const help_text =
+    \\zpp - the Zig++ frontend compiler driver
+    \\
+    \\Usage:
+    \\  zpp <subcommand> [args...]
+    \\
+    \\Subcommands:
+    \\  build [path]        Compile a .zpp project (lowers .zpp -> .zig, then runs `zig build`)
+    \\  run <file.zpp>      Build, then execute the resulting binary
+    \\  check <path>        Parse + sema only; no codegen
+    \\  lower <file.zpp>    Print the generated .zig to stdout (debug aid)
+    \\  fmt [path]          Format .zpp sources (delegates to zpp_fmt)
+    \\  doc [path]          Generate documentation (delegates to zpp_doc)
+    \\  migrate <path>      Rewrite Zig sources into idiomatic Zig++ (delegates to zpp_migrate)
+    \\  version             Print the zpp version string
+    \\  help, --help, -h    Print this help text
+    \\
+;
+
+pub fn main() !void {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const args = try std.process.argsAlloc(allocator);
+    defer std.process.argsFree(allocator, args);
+
+    if (args.len < 2) {
+        try printHelp();
+        std.process.exit(2);
+    }
+
+    const sub = args[1];
+    const rest = args[2..];
+
+    if (std.mem.eql(u8, sub, "version")) {
+        try printVersion();
+        return;
+    }
+    if (std.mem.eql(u8, sub, "help") or
+        std.mem.eql(u8, sub, "--help") or
+        std.mem.eql(u8, sub, "-h"))
+    {
+        try printHelp();
+        return;
+    }
+    if (std.mem.eql(u8, sub, "build")) return cmdBuild(allocator, rest);
+    if (std.mem.eql(u8, sub, "run")) return cmdRun(allocator, rest);
+    if (std.mem.eql(u8, sub, "check")) return cmdCheck(allocator, rest);
+    if (std.mem.eql(u8, sub, "lower")) return cmdLower(allocator, rest);
+    if (std.mem.eql(u8, sub, "fmt")) return cmdFmt(allocator, rest);
+    if (std.mem.eql(u8, sub, "doc")) return cmdDoc(allocator, rest);
+    if (std.mem.eql(u8, sub, "migrate")) return cmdMigrate(allocator, rest);
+
+    try printHelp();
+    std.process.exit(2);
+}
+
+// TODO: switch to stdout writer once API stabilizes
+fn printVersion() !void {
+    std.debug.print("{s}", .{version_text});
+}
+
+// TODO: switch to stdout writer once API stabilizes
+fn printHelp() !void {
+    std.debug.print("{s}", .{help_text});
+}
+
+fn cmdBuild(allocator: std.mem.Allocator, args: []const []const u8) !void {
+    const dir_path: []const u8 = if (args.len == 0) "." else args[0];
+
+    // Resolve the argument: must exist and must be a directory.
+    const stat = std.fs.cwd().statFile(dir_path) catch |err| switch (err) {
+        error.FileNotFound => {
+            // TODO: switch to stderr writer once API stabilizes
+            std.debug.print("zpp build: no such directory: {s}\n", .{dir_path});
+            std.process.exit(2);
+        },
+        else => return err,
+    };
+    if (stat.kind != .directory) {
+        // TODO: switch to stderr writer once API stabilizes
+        std.debug.print("zpp build: expected a directory, got file: {s}\n", .{dir_path});
+        std.process.exit(2);
+    }
+
+    const result = try project.buildProject(allocator, dir_path);
+    defer allocator.free(result.out_dir);
+
+    // TODO: switch to stderr writer once API stabilizes
+    std.debug.print(
+        "[zpp] lowered {d} files to {s}/\n",
+        .{ result.lowered, result.out_dir },
+    );
+
+    if (result.failed > 0) std.process.exit(1);
+}
+
+fn cmdRun(allocator: std.mem.Allocator, args: []const []const u8) !void {
+    const dir_path: []const u8 = if (args.len == 0) "." else args[0];
+
+    // Resolve the argument: must exist and must be a directory.
+    const stat = std.fs.cwd().statFile(dir_path) catch |err| switch (err) {
+        error.FileNotFound => {
+            // TODO: switch to stderr writer once API stabilizes
+            std.debug.print("zpp run: no such directory: {s}\n", .{dir_path});
+            std.process.exit(2);
+        },
+        else => return err,
+    };
+    if (stat.kind != .directory) {
+        // TODO: switch to stderr writer once API stabilizes
+        std.debug.print("zpp run: expected a directory, got file: {s}\n", .{dir_path});
+        std.process.exit(2);
+    }
+
+    const result = try project.buildProject(allocator, dir_path);
+    defer allocator.free(result.out_dir);
+
+    // TODO: switch to stderr writer once API stabilizes
+    std.debug.print(
+        "[zpp] lowered {d} files to {s}/\n",
+        .{ result.lowered, result.out_dir },
+    );
+
+    if (result.failed > 0) std.process.exit(1);
+
+    // TODO: switch to stderr writer once API stabilizes
+    std.debug.print("[zpp] running `zig build run` in {s}\n", .{dir_path});
+
+    var child = std.process.Child.init(&.{ "zig", "build", "run" }, allocator);
+    child.cwd = dir_path;
+    child.stdin_behavior = .Inherit;
+    child.stdout_behavior = .Inherit;
+    child.stderr_behavior = .Inherit;
+    const term = try child.spawnAndWait();
+    switch (term) {
+        .Exited => |code| std.process.exit(code),
+        else => std.process.exit(1),
+    }
+}
+
+fn cmdCheck(allocator: std.mem.Allocator, args: []const []const u8) !void {
+    _ = allocator;
+    _ = args;
+    @panic("TODO: zpp check not yet implemented");
+}
+
+fn cmdLower(allocator: std.mem.Allocator, args: []const []const u8) !void {
+    if (args.len < 1) {
+        // TODO: switch to stderr writer once API stabilizes
+        std.debug.print("zpp lower: missing <file.zpp> argument\n", .{});
+        std.process.exit(2);
+    }
+
+    const path = args[0];
+    const max_size: usize = 1 * 1024 * 1024;
+    const source = try std.fs.cwd().readFileAlloc(allocator, path, max_size);
+    defer allocator.free(source);
+
+    const lowered = try lower_to_zig.lowerSource(allocator, source);
+    defer allocator.free(lowered);
+
+    // TODO: switch to stdout writer once API stabilizes
+    std.debug.print("{s}", .{lowered});
+}
+
+fn cmdFmt(allocator: std.mem.Allocator, args: []const []const u8) !void {
+    _ = allocator;
+    _ = args;
+    @panic("TODO: zpp fmt not yet implemented (will call zpp_fmt.run)");
+}
+
+fn cmdDoc(allocator: std.mem.Allocator, args: []const []const u8) !void {
+    _ = allocator;
+    _ = args;
+    @panic("TODO: zpp doc not yet implemented (will call zpp_doc.run)");
+}
+
+fn cmdMigrate(allocator: std.mem.Allocator, args: []const []const u8) !void {
+    _ = allocator;
+    _ = args;
+    @panic("TODO: zpp migrate not yet implemented (will call zpp_migrate.run)");
+}

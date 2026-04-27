@@ -1,0 +1,12 @@
+//! must pass no-hidden-allocation conformance
+const std = @import("std");
+
+effects(.noalloc, .noio)
+pub fn hashBytes(bytes: []const u8) u64 {
+    var h: u64 = 0xcbf29ce484222325;
+    for (bytes) |b| {
+        h ^= @as(u64, b);
+        h *%= 0x100000001b3;
+    }
+    return h;
+}

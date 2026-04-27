@@ -1,0 +1,54 @@
+//! owned_file.zpp — affine ownership: `own var`, `move`, and the use-after-move
+//! analyzer. Comments mark lines the analyzer must reject when uncommented.
+
+const std = @import("std");
+const zpp = @import("zpp");
+
+owned struct Buffer {
+    bytes: []u8,
+    allocator: std.mem.Allocator,
+
+    pub fn init(allocator: std.mem.Allocator, capacity: usize) !Buffer {
+        const bytes = try allocator.alloc(u8, capacity);
+        return .{ .bytes = bytes, .allocator = allocator };
+    }
+
+    pub fn deinit(self: *Buffer) void {
+        self.allocator.free(self.bytes);
+    }
+
+    pub fn fill(self: *Buffer, value: u8) void {
+        @memset(self.bytes, value);
+    }
+
+    pub fn len(self: *const Buffer) usize {
+        return self.bytes.len;
+    }
+}
+
+fn consume(own b: Buffer) void {
+    using held = b;
+    held.fill(0);
+}
+
+pub fn main() !void {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    own var buf = try Buffer.init(allocator, 4096);
+    buf.fill(0xAA);
+
+    var moved = move buf;
+
+    // After `move buf`, the source binding is dead. Both lines below would
+    // be rejected by the must-deinit / use-after-move analyzer:
+    //   buf.fill(0x00);              // compile error: owned value used after move
+    //   const n = buf.len();         // compile error: owned value used after move
+
+    consume(move moved);
+
+    // `moved` was transferred into `consume`, which deinits it. Reusing it
+    // here would also be rejected:
+    //   moved.fill(0x11);            // compile error: owned value used after move
+}

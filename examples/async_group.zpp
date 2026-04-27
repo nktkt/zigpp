@@ -1,0 +1,38 @@
+//! async_group.zpp — structured concurrency via `zpp.async.TaskGroup`.
+//!
+//! Visibility promises this example illustrates:
+//!   - spawn is visible: every `group.spawn(...)` call appears at the call site
+//!   - cancel is visible: cancellation flows through `group` (no hidden global)
+//!   - allocator is visible: the group is constructed with an explicit allocator
+//!   - task stack allocation is visible: stacks come from the group's allocator,
+//!     not from a hidden async runtime pool
+
+const std = @import("std");
+const zpp = @import("zpp");
+
+fn jobA() effects(.io) !void {
+    const stdout = std.io.getStdOut().writer();
+    try stdout.writeAll("jobA: tick\n");
+}
+
+fn jobB() effects(.io) !void {
+    const stdout = std.io.getStdOut().writer();
+    try stdout.writeAll("jobB: tick\n");
+}
+
+pub fn main() !void {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    using group = zpp.async.TaskGroup.init(allocator);
+
+    try group.spawn(fn () !void {
+        try jobA();
+    });
+    try group.spawn(fn () !void {
+        try jobB();
+    });
+
+    try group.join();
+}

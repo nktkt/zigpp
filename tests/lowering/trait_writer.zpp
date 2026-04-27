@@ -1,0 +1,4 @@
+trait Writer {
+    fn write(self, bytes: []const u8) !usize;
+    fn flush(self) !void;
+}

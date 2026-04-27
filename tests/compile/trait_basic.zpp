@@ -1,0 +1,21 @@
+//! must compile cleanly
+const std = @import("std");
+
+trait Greeter {
+    fn greet(self) []const u8;
+}
+
+const Hello = struct {
+    msg: []const u8,
+
+    impl Greeter {
+        fn greet(self) []const u8 {
+            return self.msg;
+        }
+    }
+};
+
+pub fn main() !void {
+    const h = Hello{ .msg = "hi" };
+    _ = h.greet();
+}

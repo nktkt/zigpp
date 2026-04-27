@@ -1,0 +1,10 @@
+//! expect-error: E0002 owned value used after move
+const std = @import("std");
+
+pub fn oops(allocator: std.mem.Allocator) !void {
+    own var x = try allocator.create(u32);
+    using x;
+    var y = move x;
+    _ = y;
+    _ = x.something();
+}

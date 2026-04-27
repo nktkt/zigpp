@@ -1,0 +1,18 @@
+const std = @import("std");
+
+const Greeter = struct {
+    name: []const u8,
+
+    pub fn deinit(self: *Greeter) void {
+        _ = self;
+    }
+
+    pub fn hello(self: *const Greeter) void {
+        std.debug.print("hello, {s}!\n", .{self.name});
+    }
+};
+
+pub fn main() void {
+    using g = Greeter{ .name = "zigpp" };
+    g.hello();
+}

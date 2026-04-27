@@ -1,0 +1,71 @@
+//! dyn_plugin.zpp — explicit dynamic dispatch with a stable plugin ABI.
+//! Every site where a virtual call happens carries the `dyn` keyword.
+
+const std = @import("std");
+const zpp = @import("zpp");
+
+extern interface AudioPlugin {
+    fn process(self, input: []const f32, output: []f32) void;
+    fn name(self) []const u8;
+}
+
+struct GainPlugin {
+    gain: f32,
+
+    pub fn process(self: *const GainPlugin, input: []const f32, output: []f32) void {
+        var i: usize = 0;
+        while (i < input.len) : (i += 1) {
+            output[i] = input[i] * self.gain;
+        }
+    }
+
+    pub fn name(self: *const GainPlugin) []const u8 {
+        _ = self;
+        return "gain";
+    }
+}
+
+struct MutePlugin {}
+
+impl MutePlugin {
+    pub fn process(self: *const MutePlugin, input: []const f32, output: []f32) void {
+        _ = self;
+        _ = input;
+        @memset(output, 0.0);
+    }
+
+    pub fn name(self: *const MutePlugin) []const u8 {
+        _ = self;
+        return "mute";
+    }
+}
+
+fn runAll(plugins: []dyn AudioPlugin, input: []const f32, output: []f32) void {
+    for (plugins) |p: dyn AudioPlugin| {
+        p.process(input, output);
+    }
+}
+
+pub fn main() !void {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var gain = GainPlugin{ .gain = 0.5 };
+    var mute = MutePlugin{};
+
+    const slots = try allocator.alloc(dyn AudioPlugin, 2);
+    defer allocator.free(slots);
+    slots[0] = dyn AudioPlugin.from(&gain);
+    slots[1] = dyn AudioPlugin.from(&mute);
+
+    const input = [_]f32{ 1.0, 2.0, 3.0, 4.0 };
+    var output: [4]f32 = undefined;
+
+    runAll(slots, input[0..], output[0..]);
+
+    var stdout = std.io.getStdOut().writer();
+    for (slots) |p: dyn AudioPlugin| {
+        try stdout.print("ran plugin: {s}\n", .{p.name()});
+    }
+}

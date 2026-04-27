@@ -1,0 +1,16 @@
+.{
+    .name = .zigpp,
+    .version = "0.0.1",
+    .fingerprint = 0x1cc6295daff6d86,
+    .minimum_zig_version = "0.15.0",
+    .dependencies = .{},
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "compiler",
+        "lib",
+        "tools",
+        "examples",
+        "tests",
+    },
+}

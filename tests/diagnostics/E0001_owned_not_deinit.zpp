@@ -1,0 +1,8 @@
+//! expect-error: E0001 owned value was not deinitialized
+const std = @import("std");
+
+pub fn leaky(allocator: std.mem.Allocator) !void {
+    own var x = try allocator.create(u32);
+    x.* = 42;
+    // falls off scope without `using` or explicit deinit -> E0001
+}

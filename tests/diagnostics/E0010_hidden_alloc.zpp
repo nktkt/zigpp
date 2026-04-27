@@ -1,0 +1,11 @@
+//! expect-error: E0010 hidden allocation in noalloc function
+const std = @import("std");
+
+fn allocates(allocator: std.mem.Allocator) ![]u8 {
+    return try allocator.alloc(u8, 16);
+}
+
+effects(.noalloc)
+pub fn pureLooking(allocator: std.mem.Allocator) !void {
+    _ = try allocates(allocator);
+}
