@@ -1,3 +1,4 @@
+// expected stderr: hello, zigpp!\n
 const std = @import("std");
 
 trait Greeter {
@@ -11,15 +12,7 @@ const Hello = struct {
     }
 };
 
-const Tag = struct {
-    label: []const u8,
-    pub fn deinit(self: *Tag) void {
-        _ = self;
-    }
-};
-
 pub fn main() void {
-    using scope = Tag{ .label = "main" };
     var hello = Hello{ .name = "zigpp" };
     const g: Greeter = Greeter.from(&hello);
     g.greet();

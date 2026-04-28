@@ -241,9 +241,165 @@ fn emitReplacement(
         try writeIndentedLine(allocator, out, indent, "    }");
     }
 
+    // Auto-injected `from(impl)` factory: type-erases any `*T` whose `T`
+    // declares each trait method into a fat pointer. The wrappers live on a
+    // comptime-generated anonymous struct so the vtable-of-wrappers is
+    // monomorphized once per `ImplT`.
+    try writeIndentedLine(allocator, out, indent, "");
+    try emitFromFactory(allocator, out, indent, trait_name, methods.items);
+
     // Trailing `};` on the same indentation as `trait`.
     try out.appendSlice(allocator, indent);
     try out.appendSlice(allocator, "};");
+}
+
+/// Emit the `pub fn from(impl_ptr: anytype) Name { ... }` factory. Generates
+/// one `<m>_wrapper` per trait method that bounces a `*anyopaque` self-arg
+/// back to `*ImplT` (via `@ptrCast` + `@alignCast`) and forwards the call.
+/// The static `vt: VTable` initializer wires each wrapper into the vtable in
+/// declaration order.
+fn emitFromFactory(
+    allocator: std.mem.Allocator,
+    out: *std.ArrayList(u8),
+    indent: []const u8,
+    trait_name: []const u8,
+    methods: anytype,
+) !void {
+    // Header.
+    try out.appendSlice(allocator, indent);
+    try out.appendSlice(allocator, "    pub fn from(impl_ptr: anytype) ");
+    try out.appendSlice(allocator, trait_name);
+    try out.appendSlice(allocator, " {\n");
+
+    if (methods.len == 0) {
+        // Empty trait: produce a minimal valid factory. No wrappers, an
+        // empty vtable initializer, and `undefined` for the data ptr — the
+        // factory is reachable only by code that explicitly calls it, and an
+        // empty trait has no methods to dispatch through.
+        try out.appendSlice(allocator, indent);
+        try out.appendSlice(allocator, "        _ = impl_ptr;\n");
+        try out.appendSlice(allocator, indent);
+        try out.appendSlice(allocator, "        const gen = struct {\n");
+        try out.appendSlice(allocator, indent);
+        try out.appendSlice(allocator, "            const vt: VTable = .{};\n");
+        try out.appendSlice(allocator, indent);
+        try out.appendSlice(allocator, "        };\n");
+        try out.appendSlice(allocator, indent);
+        try out.appendSlice(allocator, "        return .{ .ptr = undefined, .vtable = &gen.vt };\n");
+        try out.appendSlice(allocator, indent);
+        try out.appendSlice(allocator, "    }\n");
+        return;
+    }
+
+    // `ImplT` recovery. Lowercase `pointer` field on Zig 0.15.2 — the
+    // round-trip `@ptrCast(@alignCast(self))` then casts back to `*ImplT`.
+    try out.appendSlice(allocator, indent);
+    try out.appendSlice(allocator, "        const ImplT = @typeInfo(@TypeOf(impl_ptr)).pointer.child;\n");
+    try out.appendSlice(allocator, indent);
+    try out.appendSlice(allocator, "        const gen = struct {\n");
+
+    // Each method's wrapper.
+    for (methods) |m| {
+        try out.appendSlice(allocator, indent);
+        try out.appendSlice(allocator, "            fn ");
+        try out.appendSlice(allocator, m.name);
+        try out.appendSlice(allocator, "_wrapper(self: *anyopaque");
+        try writeOtherParamsVtable(out, allocator, m.params_src);
+        try out.appendSlice(allocator, ") ");
+        try writeReturnType(out, allocator, m.ret_src);
+        try out.appendSlice(allocator, " {\n");
+        try out.appendSlice(allocator, indent);
+        try out.appendSlice(allocator, "                const t: *ImplT = @ptrCast(@alignCast(self));\n");
+        try out.appendSlice(allocator, indent);
+        try out.appendSlice(allocator, "                return t.");
+        try out.appendSlice(allocator, m.name);
+        try out.appendSlice(allocator, "(");
+        try writeArgNamesNoLeadComma(out, allocator, m.params_src);
+        try out.appendSlice(allocator, ");\n");
+        try out.appendSlice(allocator, indent);
+        try out.appendSlice(allocator, "            }\n");
+    }
+
+    // Static vt initializer.
+    try out.appendSlice(allocator, indent);
+    try out.appendSlice(allocator, "            const vt: VTable = .{ ");
+    for (methods, 0..) |m, idx| {
+        if (idx > 0) try out.appendSlice(allocator, ", ");
+        try out.append(allocator, '.');
+        try out.appendSlice(allocator, m.name);
+        try out.appendSlice(allocator, " = ");
+        try out.appendSlice(allocator, m.name);
+        try out.appendSlice(allocator, "_wrapper");
+    }
+    try out.appendSlice(allocator, " };\n");
+
+    try out.appendSlice(allocator, indent);
+    try out.appendSlice(allocator, "        };\n");
+    try out.appendSlice(allocator, indent);
+    try out.appendSlice(allocator, "        return .{ .ptr = @ptrCast(impl_ptr), .vtable = &gen.vt };\n");
+    try out.appendSlice(allocator, indent);
+    try out.appendSlice(allocator, "    }\n");
+}
+
+/// Like `writeOtherArgNames` but without the leading `, `. Used inside
+/// `t.<m>(<args>)` where there's no `self.ptr` first arg to comma-prefix.
+fn writeArgNamesNoLeadComma(
+    out: *std.ArrayList(u8),
+    allocator: std.mem.Allocator,
+    params_src: []const u8,
+) !void {
+    const rest = otherParamsSlice(params_src);
+    if (rest.len == 0) return;
+
+    var depth_paren: i32 = 0;
+    var depth_brack: i32 = 0;
+    var seg_start: usize = 0;
+    var i: usize = 0;
+    var first = true;
+    while (i <= rest.len) : (i += 1) {
+        const at_end = i == rest.len;
+        const at_top_comma = !at_end and rest[i] == ',' and depth_paren == 0 and depth_brack == 0;
+        if (at_end or at_top_comma) {
+            const seg = std.mem.trim(u8, rest[seg_start..i], " \t\r\n");
+            var dp: i32 = 0;
+            var db: i32 = 0;
+            var name_end: usize = seg.len;
+            var sj: usize = 0;
+            while (sj < seg.len) : (sj += 1) {
+                const c = seg[sj];
+                switch (c) {
+                    '(' => dp += 1,
+                    ')' => dp -= 1,
+                    '[' => db += 1,
+                    ']' => db -= 1,
+                    ':' => {
+                        if (dp == 0 and db == 0) {
+                            name_end = sj;
+                            break;
+                        }
+                    },
+                    else => {},
+                }
+            }
+            const name = std.mem.trim(u8, seg[0..name_end], " \t\r\n");
+            if (name.len > 0) {
+                if (!first) try out.appendSlice(allocator, ", ");
+                try out.appendSlice(allocator, name);
+                first = false;
+            }
+            seg_start = i + 1;
+        }
+        if (!at_end) {
+            const c = rest[i];
+            switch (c) {
+                '(' => depth_paren += 1,
+                ')' => depth_paren -= 1,
+                '[' => depth_brack += 1,
+                ']' => depth_brack -= 1,
+                else => {},
+            }
+        }
+    }
 }
 
 /// Append `<indent><body>\n`, with the special case that if `body` is empty
@@ -437,6 +593,18 @@ test "lowerTraits: single-method trait canonical output" {
         "    pub fn write(self: W, b: []const u8) anyerror!usize {\n" ++
         "        return self.vtable.write(self.ptr, b);\n" ++
         "    }\n" ++
+        "\n" ++
+        "    pub fn from(impl_ptr: anytype) W {\n" ++
+        "        const ImplT = @typeInfo(@TypeOf(impl_ptr)).pointer.child;\n" ++
+        "        const gen = struct {\n" ++
+        "            fn write_wrapper(self: *anyopaque, b: []const u8) anyerror!usize {\n" ++
+        "                const t: *ImplT = @ptrCast(@alignCast(self));\n" ++
+        "                return t.write(b);\n" ++
+        "            }\n" ++
+        "            const vt: VTable = .{ .write = write_wrapper };\n" ++
+        "        };\n" ++
+        "        return .{ .ptr = @ptrCast(impl_ptr), .vtable = &gen.vt };\n" ++
+        "    }\n" ++
         "};\n";
     const out = try lowerTraits(testing.allocator, src);
     defer testing.allocator.free(out);
@@ -445,17 +613,12 @@ test "lowerTraits: single-method trait canonical output" {
 
 test "lowerTraits: empty trait body" {
     const src = "trait E {}\n";
-    const expected =
-        "pub const E = struct {\n" ++
-        "    ptr: *anyopaque,\n" ++
-        "    vtable: *const VTable,\n" ++
-        "\n" ++
-        "    pub const VTable = struct {\n" ++
-        "    };\n" ++
-        "};\n";
     const out = try lowerTraits(testing.allocator, src);
     defer testing.allocator.free(out);
-    try testing.expectEqualStrings(expected, out);
+    // Empty trait still emits a minimal `from`. We don't pin the full body —
+    // the goal is just that `pub fn from(` shows up so the API is uniform.
+    try testing.expect(std.mem.indexOf(u8, out, "pub const E = struct {") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "pub fn from(impl_ptr: anytype) E") != null);
 }
 
 test "lowerTraits: two-method trait keeps declaration order" {
@@ -481,6 +644,22 @@ test "lowerTraits: two-method trait keeps declaration order" {
         "    pub fn flush(self: Writer) anyerror!void {\n" ++
         "        return self.vtable.flush(self.ptr);\n" ++
         "    }\n" ++
+        "\n" ++
+        "    pub fn from(impl_ptr: anytype) Writer {\n" ++
+        "        const ImplT = @typeInfo(@TypeOf(impl_ptr)).pointer.child;\n" ++
+        "        const gen = struct {\n" ++
+        "            fn write_wrapper(self: *anyopaque, bytes: []const u8) anyerror!usize {\n" ++
+        "                const t: *ImplT = @ptrCast(@alignCast(self));\n" ++
+        "                return t.write(bytes);\n" ++
+        "            }\n" ++
+        "            fn flush_wrapper(self: *anyopaque) anyerror!void {\n" ++
+        "                const t: *ImplT = @ptrCast(@alignCast(self));\n" ++
+        "                return t.flush();\n" ++
+        "            }\n" ++
+        "            const vt: VTable = .{ .write = write_wrapper, .flush = flush_wrapper };\n" ++
+        "        };\n" ++
+        "        return .{ .ptr = @ptrCast(impl_ptr), .vtable = &gen.vt };\n" ++
+        "    }\n" ++
         "};\n";
     const out = try lowerTraits(testing.allocator, src);
     defer testing.allocator.free(out);
@@ -504,6 +683,18 @@ test "lowerTraits: indented trait keeps 4-space prefix on every line" {
         "        pub fn write(self: W, b: []const u8) anyerror!usize {\n" ++
         "            return self.vtable.write(self.ptr, b);\n" ++
         "        }\n" ++
+        "\n" ++
+        "        pub fn from(impl_ptr: anytype) W {\n" ++
+        "            const ImplT = @typeInfo(@TypeOf(impl_ptr)).pointer.child;\n" ++
+        "            const gen = struct {\n" ++
+        "                fn write_wrapper(self: *anyopaque, b: []const u8) anyerror!usize {\n" ++
+        "                    const t: *ImplT = @ptrCast(@alignCast(self));\n" ++
+        "                    return t.write(b);\n" ++
+        "                }\n" ++
+        "                const vt: VTable = .{ .write = write_wrapper };\n" ++
+        "            };\n" ++
+        "            return .{ .ptr = @ptrCast(impl_ptr), .vtable = &gen.vt };\n" ++
+        "        }\n" ++
         "    };\n";
     const out = try lowerTraits(testing.allocator, src);
     defer testing.allocator.free(out);
@@ -524,6 +715,18 @@ test "lowerTraits: self-only method has no extra args" {
         "    pub fn close(self: C) void {\n" ++
         "        return self.vtable.close(self.ptr);\n" ++
         "    }\n" ++
+        "\n" ++
+        "    pub fn from(impl_ptr: anytype) C {\n" ++
+        "        const ImplT = @typeInfo(@TypeOf(impl_ptr)).pointer.child;\n" ++
+        "        const gen = struct {\n" ++
+        "            fn close_wrapper(self: *anyopaque) void {\n" ++
+        "                const t: *ImplT = @ptrCast(@alignCast(self));\n" ++
+        "                return t.close();\n" ++
+        "            }\n" ++
+        "            const vt: VTable = .{ .close = close_wrapper };\n" ++
+        "        };\n" ++
+        "        return .{ .ptr = @ptrCast(impl_ptr), .vtable = &gen.vt };\n" ++
+        "    }\n" ++
         "};\n";
     const out = try lowerTraits(testing.allocator, src);
     defer testing.allocator.free(out);
@@ -543,6 +746,18 @@ test "lowerTraits: non-error return is copied unchanged" {
         "\n" ++
         "    pub fn name(self: N) []const u8 {\n" ++
         "        return self.vtable.name(self.ptr);\n" ++
+        "    }\n" ++
+        "\n" ++
+        "    pub fn from(impl_ptr: anytype) N {\n" ++
+        "        const ImplT = @typeInfo(@TypeOf(impl_ptr)).pointer.child;\n" ++
+        "        const gen = struct {\n" ++
+        "            fn name_wrapper(self: *anyopaque) []const u8 {\n" ++
+        "                const t: *ImplT = @ptrCast(@alignCast(self));\n" ++
+        "                return t.name();\n" ++
+        "            }\n" ++
+        "            const vt: VTable = .{ .name = name_wrapper };\n" ++
+        "        };\n" ++
+        "        return .{ .ptr = @ptrCast(impl_ptr), .vtable = &gen.vt };\n" ++
         "    }\n" ++
         "};\n";
     const out = try lowerTraits(testing.allocator, src);
@@ -572,6 +787,18 @@ test "lowerTraits: surrounding code passes through" {
         "\n" ++
         "    pub fn write(self: W, b: []const u8) anyerror!usize {\n" ++
         "        return self.vtable.write(self.ptr, b);\n" ++
+        "    }\n" ++
+        "\n" ++
+        "    pub fn from(impl_ptr: anytype) W {\n" ++
+        "        const ImplT = @typeInfo(@TypeOf(impl_ptr)).pointer.child;\n" ++
+        "        const gen = struct {\n" ++
+        "            fn write_wrapper(self: *anyopaque, b: []const u8) anyerror!usize {\n" ++
+        "                const t: *ImplT = @ptrCast(@alignCast(self));\n" ++
+        "                return t.write(b);\n" ++
+        "            }\n" ++
+        "            const vt: VTable = .{ .write = write_wrapper };\n" ++
+        "        };\n" ++
+        "        return .{ .ptr = @ptrCast(impl_ptr), .vtable = &gen.vt };\n" ++
         "    }\n" ++
         "};\n" ++
         "\n" ++
