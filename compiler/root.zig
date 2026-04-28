@@ -13,6 +13,7 @@ pub const checks = @import("checks.zig");
 pub const derive_lower = @import("derive_lower.zig");
 pub const diagnostics = @import("diagnostics.zig");
 pub const doc_extract = @import("doc_extract.zig");
+pub const fmt = @import("fmt.zig");
 pub const lexer = @import("lexer.zig");
 pub const lower_to_zig = @import("lower_to_zig.zig");
 pub const migrate = @import("migrate.zig");

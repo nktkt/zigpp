@@ -31,7 +31,7 @@ const help_text =
     \\  run <file.zpp>      Build, then execute the resulting binary
     \\  check [path]        Run all sema checks (E0001/E0002/E0010) on a project, no codegen
     \\  lower <file.zpp>    Print the generated .zig to stdout (debug aid)
-    \\  fmt [path]          Format .zpp sources (delegates to zpp_fmt)
+    \\  fmt [--check] [path]   Whitespace-only format .zpp files; --check reports without writing
     \\  doc [path]          Generate a Markdown project reference under <path>/.zpp-doc/
     \\  migrate [--apply] [path]   Suggest (or apply) Zig -> Zig++ rewrites under <path>
     \\  version             Print the zpp version string
@@ -260,9 +260,18 @@ fn cmdLower(allocator: std.mem.Allocator, args: []const []const u8) !void {
 }
 
 fn cmdFmt(allocator: std.mem.Allocator, args: []const []const u8) !void {
-    _ = allocator;
-    _ = args;
-    @panic("TODO: zpp fmt not yet implemented (will call zpp_fmt.run)");
+    var check_only = false;
+    var path: []const u8 = ".";
+    var i: usize = 0;
+    while (i < args.len) : (i += 1) {
+        if (std.mem.eql(u8, args[i], "--check")) {
+            check_only = true;
+        } else {
+            path = args[i];
+        }
+    }
+    const code = try zpp_fmt.run(allocator, &.{path}, check_only);
+    std.process.exit(code);
 }
 
 fn cmdDoc(allocator: std.mem.Allocator, args: []const []const u8) !void {
