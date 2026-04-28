@@ -1,0 +1,4 @@
+const User = struct {
+    id: u64,
+    name: []const u8,
+} derive(.{ Hash, Json });

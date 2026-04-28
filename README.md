@@ -256,4 +256,4 @@ without invisible cost.
 
 ## License
 
-Unlicensed research code. Use at your own risk.
+MIT. See [LICENSE](LICENSE).

@@ -9,6 +9,7 @@
 const std = @import("std");
 const ast = @import("ast.zig");
 const trait_lower = @import("trait_lower.zig");
+const derive_lower = @import("derive_lower.zig");
 
 /// Lower a Zig++ source string to Zig.
 ///
@@ -50,7 +51,9 @@ const trait_lower = @import("trait_lower.zig");
 pub fn lowerSource(allocator: std.mem.Allocator, source: []const u8) ![]u8 {
     const after_lines = try lowerSourceLineRules(allocator, source);
     defer allocator.free(after_lines);
-    return try trait_lower.lowerTraits(allocator, after_lines);
+    const after_traits = try trait_lower.lowerTraits(allocator, after_lines);
+    defer allocator.free(after_traits);
+    return try derive_lower.lowerDerives(allocator, after_traits);
 }
 
 /// Run only the line-based lowering rules (using/effects/own/move/owned).
