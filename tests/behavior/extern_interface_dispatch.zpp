@@ -1,0 +1,19 @@
+// expected stderr: boop\n
+const std = @import("std");
+
+extern interface Beeper {
+    fn beep(self) void;
+}
+
+const Boop = struct {
+    pub fn beep(self: *Boop) void {
+        _ = self;
+        std.debug.print("boop\n", .{});
+    }
+};
+
+pub fn main() void {
+    var b = Boop{};
+    const beeper: Beeper = Beeper.from(&b);
+    beeper.beep();
+}

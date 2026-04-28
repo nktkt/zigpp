@@ -22,10 +22,14 @@
 const std = @import("std");
 const lexer = @import("lexer.zig");
 
-/// Find every `trait <Name> { fn <m>(self, ...) <ret>; ... }` block in `source`
-/// and replace it with a Zig fat-pointer struct + vtable + dispatch wrappers.
-/// Returns an owned, transformed copy of `source`. If there are no traits, the
-/// result is byte-equal to the input.
+/// Find every `trait <Name> { ... }` or `extern interface <Name> { ... }`
+/// block in `source` and replace it with a Zig fat-pointer struct + vtable +
+/// dispatch wrappers. Returns an owned, transformed copy of `source`. If there
+/// are no matching blocks, the result is byte-equal to the input.
+///
+/// For the research compiler, `extern interface` lowers identically to `trait`;
+/// future work could differentiate by enforcing extern struct layout / C ABI on
+/// the VTable so plugin DLLs can be loaded across compiler versions.
 pub fn lowerTraits(allocator: std.mem.Allocator, source: []const u8) ![]u8 {
     const tokens = try lexer.tokenize(allocator, source);
     defer allocator.free(tokens);
@@ -39,17 +43,39 @@ pub fn lowerTraits(allocator: std.mem.Allocator, source: []const u8) ![]u8 {
     var ti: usize = 0;
     while (ti < tokens.len) : (ti += 1) {
         const t = tokens[ti];
-        if (t.kind != .kw_trait) continue;
 
-        // Need `kw_trait ident lbrace` to qualify as a trait declaration.
-        if (ti + 2 >= tokens.len) break;
-        const name_tok = tokens[ti + 1];
-        const lbrace_tok = tokens[ti + 2];
-        if (name_tok.kind != .ident or lbrace_tok.kind != .lbrace) continue;
+        // Match either `kw_trait ident lbrace` or
+        // `kw_extern kw_interface ident lbrace`. The matched start token is
+        // `t` (whose `.start` becomes the splice anchor); `name_idx`/`brace_idx`
+        // are token indices for the name and the opening brace.
+        var name_idx: usize = 0;
+        var lbrace_idx: usize = 0;
+        if (t.kind == .kw_trait) {
+            if (ti + 2 >= tokens.len) break;
+            if (tokens[ti + 1].kind != .ident or tokens[ti + 2].kind != .lbrace) continue;
+            name_idx = ti + 1;
+            lbrace_idx = ti + 2;
+        } else if (t.kind == .kw_extern) {
+            // `extern interface <Name> {` — require all four tokens contiguously.
+            // The lexer skips trivia, so adjacent tokens here are already the
+            // significant ones.
+            if (ti + 3 >= tokens.len) break;
+            if (tokens[ti + 1].kind != .kw_interface or
+                tokens[ti + 2].kind != .ident or
+                tokens[ti + 3].kind != .lbrace) continue;
+            name_idx = ti + 2;
+            lbrace_idx = ti + 3;
+        } else {
+            continue;
+        }
+
+        const name_tok = tokens[name_idx];
+        const lbrace_tok = tokens[lbrace_idx];
+        _ = lbrace_tok;
 
         // Find the matching rbrace using depth tracking.
         var depth: usize = 1;
-        var end_ti: usize = ti + 3;
+        var end_ti: usize = lbrace_idx + 1;
         while (end_ti < tokens.len and depth > 0) : (end_ti += 1) {
             switch (tokens[end_ti].kind) {
                 .lbrace => depth += 1,
@@ -65,22 +91,21 @@ pub fn lowerTraits(allocator: std.mem.Allocator, source: []const u8) ![]u8 {
         const trait_start: usize = t.start;
         const trait_end_excl: usize = rbrace_tok.end; // exclusive end in source
 
-        // Emit everything before the `trait` keyword.
+        // Emit everything before the matched keyword (trait or extern).
         try out.appendSlice(allocator, source[src_cursor..trait_start]);
 
         // Compute the indentation: leading horizontal whitespace on the line
-        // containing `kw_trait`. We scan backwards from `trait_start` to the
-        // previous '\n' (or BOF), then forward over hspace.
+        // containing the opening keyword.
         const indent = computeIndent(source, trait_start);
 
-        // Parse methods between lbrace_tok and rbrace_tok and emit replacement.
+        // Parse methods between lbrace and rbrace and emit replacement.
         const name_text = source[name_tok.start..name_tok.end];
         try emitReplacement(
             allocator,
             &out,
             source,
             tokens,
-            ti + 3, // first token inside the trait body
+            lbrace_idx + 1, // first token inside the body
             end_ti - 1, // index of the closing rbrace
             name_text,
             indent,
@@ -808,14 +833,119 @@ test "lowerTraits: surrounding code passes through" {
     try testing.expectEqualStrings(expected, out);
 }
 
-test "lowerTraits: extern interface is NOT touched" {
-    // The pass keys on `kw_trait` only; `extern interface` lexes as
-    // kw_extern + kw_interface and must pass through verbatim.
+test "lowerTraits: extern interface lowers identically to trait" {
     const src =
         "extern interface AudioPlugin {\n" ++
-        "    fn process(self, input: []const f32) void;\n" ++
+        "    fn process(self, input: []const f32, output: []f32) void;\n" ++
+        "    fn name(self) []const u8;\n" ++
+        "}\n";
+    const expected =
+        "pub const AudioPlugin = struct {\n" ++
+        "    ptr: *anyopaque,\n" ++
+        "    vtable: *const VTable,\n" ++
+        "\n" ++
+        "    pub const VTable = struct {\n" ++
+        "        process: *const fn (self: *anyopaque, input: []const f32, output: []f32) void,\n" ++
+        "        name: *const fn (self: *anyopaque) []const u8,\n" ++
+        "    };\n" ++
+        "\n" ++
+        "    pub fn process(self: AudioPlugin, input: []const f32, output: []f32) void {\n" ++
+        "        return self.vtable.process(self.ptr, input, output);\n" ++
+        "    }\n" ++
+        "\n" ++
+        "    pub fn name(self: AudioPlugin) []const u8 {\n" ++
+        "        return self.vtable.name(self.ptr);\n" ++
+        "    }\n" ++
+        "\n" ++
+        "    pub fn from(impl_ptr: anytype) AudioPlugin {\n" ++
+        "        const ImplT = @typeInfo(@TypeOf(impl_ptr)).pointer.child;\n" ++
+        "        const gen = struct {\n" ++
+        "            fn process_wrapper(self: *anyopaque, input: []const f32, output: []f32) void {\n" ++
+        "                const t: *ImplT = @ptrCast(@alignCast(self));\n" ++
+        "                return t.process(input, output);\n" ++
+        "            }\n" ++
+        "            fn name_wrapper(self: *anyopaque) []const u8 {\n" ++
+        "                const t: *ImplT = @ptrCast(@alignCast(self));\n" ++
+        "                return t.name();\n" ++
+        "            }\n" ++
+        "            const vt: VTable = .{ .process = process_wrapper, .name = name_wrapper };\n" ++
+        "        };\n" ++
+        "        return .{ .ptr = @ptrCast(impl_ptr), .vtable = &gen.vt };\n" ++
+        "    }\n" ++
+        "};\n";
+    const out = try lowerTraits(testing.allocator, src);
+    defer testing.allocator.free(out);
+    try testing.expectEqualStrings(expected, out);
+}
+
+test "lowerTraits: empty extern interface body" {
+    const src = "extern interface E {}\n";
+    const out = try lowerTraits(testing.allocator, src);
+    defer testing.allocator.free(out);
+    try testing.expect(std.mem.indexOf(u8, out, "pub const E = struct {") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "pub fn from(impl_ptr: anytype) E") != null);
+    // Ensure the `extern` and `interface` keywords are gone from the output.
+    try testing.expect(std.mem.indexOf(u8, out, "extern interface") == null);
+}
+
+test "lowerTraits: extern interface single self-only method" {
+    const src = "extern interface I {\n    fn m(self) void;\n}\n";
+    const expected =
+        "pub const I = struct {\n" ++
+        "    ptr: *anyopaque,\n" ++
+        "    vtable: *const VTable,\n" ++
+        "\n" ++
+        "    pub const VTable = struct {\n" ++
+        "        m: *const fn (self: *anyopaque) void,\n" ++
+        "    };\n" ++
+        "\n" ++
+        "    pub fn m(self: I) void {\n" ++
+        "        return self.vtable.m(self.ptr);\n" ++
+        "    }\n" ++
+        "\n" ++
+        "    pub fn from(impl_ptr: anytype) I {\n" ++
+        "        const ImplT = @typeInfo(@TypeOf(impl_ptr)).pointer.child;\n" ++
+        "        const gen = struct {\n" ++
+        "            fn m_wrapper(self: *anyopaque) void {\n" ++
+        "                const t: *ImplT = @ptrCast(@alignCast(self));\n" ++
+        "                return t.m();\n" ++
+        "            }\n" ++
+        "            const vt: VTable = .{ .m = m_wrapper };\n" ++
+        "        };\n" ++
+        "        return .{ .ptr = @ptrCast(impl_ptr), .vtable = &gen.vt };\n" ++
+        "    }\n" ++
+        "};\n";
+    const out = try lowerTraits(testing.allocator, src);
+    defer testing.allocator.free(out);
+    try testing.expectEqualStrings(expected, out);
+}
+
+test "lowerTraits: trait + extern interface in declaration order; bare `interface` ident untouched" {
+    // The bare `const interface = 1;` line uses `interface` as a value-level
+    // identifier — the lowering must leave it alone (no `extern` precedes it).
+    const src =
+        "trait W {\n" ++
+        "    fn write(self, b: []const u8) !usize;\n" ++
+        "}\n" ++
+        "\n" ++
+        "const interface = 1;\n" ++
+        "\n" ++
+        "extern interface I {\n" ++
+        "    fn m(self) void;\n" ++
         "}\n";
     const out = try lowerTraits(testing.allocator, src);
     defer testing.allocator.free(out);
-    try testing.expectEqualStrings(src, out);
+
+    // Both blocks lowered.
+    try testing.expect(std.mem.indexOf(u8, out, "pub const W = struct {") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "pub const I = struct {") != null);
+    // Declaration order preserved: W appears before I.
+    const w_idx = std.mem.indexOf(u8, out, "pub const W = struct {").?;
+    const i_idx = std.mem.indexOf(u8, out, "pub const I = struct {").?;
+    try testing.expect(w_idx < i_idx);
+    // Bare `const interface = 1;` line preserved verbatim.
+    try testing.expect(std.mem.indexOf(u8, out, "const interface = 1;") != null);
+    // No leftover Zig++ surface keywords.
+    try testing.expect(std.mem.indexOf(u8, out, "trait W") == null);
+    try testing.expect(std.mem.indexOf(u8, out, "extern interface I") == null);
 }
