@@ -33,7 +33,7 @@ const help_text =
     \\  lower <file.zpp>    Print the generated .zig to stdout (debug aid)
     \\  fmt [path]          Format .zpp sources (delegates to zpp_fmt)
     \\  doc [path]          Generate a Markdown project reference under <path>/.zpp-doc/
-    \\  migrate <path>      Rewrite Zig sources into idiomatic Zig++ (delegates to zpp_migrate)
+    \\  migrate [--apply] [path]   Suggest (or apply) Zig -> Zig++ rewrites under <path>
     \\  version             Print the zpp version string
     \\  help, --help, -h    Print this help text
     \\
@@ -289,7 +289,16 @@ fn cmdDoc(allocator: std.mem.Allocator, args: []const []const u8) !void {
 }
 
 fn cmdMigrate(allocator: std.mem.Allocator, args: []const []const u8) !void {
-    _ = allocator;
-    _ = args;
-    @panic("TODO: zpp migrate not yet implemented (will call zpp_migrate.run)");
+    var dry_run = true;
+    var path: []const u8 = ".";
+    var i: usize = 0;
+    while (i < args.len) : (i += 1) {
+        if (std.mem.eql(u8, args[i], "--apply")) {
+            dry_run = false;
+        } else {
+            path = args[i];
+        }
+    }
+    const code = try zpp_migrate.run(allocator, &.{path}, dry_run);
+    std.process.exit(code);
 }

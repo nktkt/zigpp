@@ -15,6 +15,7 @@ pub const diagnostics = @import("diagnostics.zig");
 pub const doc_extract = @import("doc_extract.zig");
 pub const lexer = @import("lexer.zig");
 pub const lower_to_zig = @import("lower_to_zig.zig");
+pub const migrate = @import("migrate.zig");
 pub const parser = @import("parser.zig");
 pub const project = @import("project.zig");
 pub const sema = @import("sema.zig");
