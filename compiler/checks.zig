@@ -164,6 +164,21 @@ fn isHandled(
             continue;
         }
 
+        // Pattern: `move <name>` — ownership transfer satisfies the deinit
+        // obligation; the moved-from binding is dead, so the new owner (or a
+        // function that consumed `move x`) is responsible from here on.
+        if (t.kind == .kw_move) {
+            const id_idx = nextNonTrivia(tokens, j + 1) orelse continue;
+            if (id_idx >= close) continue;
+            const id_tok = tokens[id_idx];
+            if (id_tok.kind == .ident and
+                std.mem.eql(u8, source[id_tok.start..id_tok.end], name))
+            {
+                return true;
+            }
+            continue;
+        }
+
         // Pattern: `<name> . deinit (`
         if (t.kind == .ident and
             std.mem.eql(u8, source[t.start..t.end], name))

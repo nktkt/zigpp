@@ -85,6 +85,10 @@ zig build test-zpp
 # Lower a project, then build and run it via `zig build run`.
 ./zig-out/bin/zpp run examples/hello_runnable
 # -> hello, zigpp!
+
+# Run all ownership / effect checks on a project (no codegen).
+./zig-out/bin/zpp check examples
+# -> [zpp] checked 5 files, 0 findings
 ```
 
 ## Language features
@@ -235,8 +239,7 @@ Categories exercised:
   with brace counting and a single-line lexical state. Documented limitations
   apply (multi-line strings, multi-line `effects(...)` calls, scope rebinding
   for `move`).
-- `zpp fmt`, `zpp doc`, `zpp lsp`, `zpp migrate`, `zpp check` are CLI
-  placeholders that panic on use.
+- `zpp fmt`, `zpp doc`, `zpp lsp`, `zpp migrate` are CLI placeholders that panic on use.
 - `derive(.{Hash, Json, ...})` is in the design but not lowered.
 - `extern interface` blocks pass through verbatim — only bare `trait` is lowered.
 - The `lib/` runtime helpers are real but minimal; many functions are skeletons.
