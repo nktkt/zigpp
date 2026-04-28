@@ -7,3 +7,4 @@ zig-out/
 **/.zpp-doc/
 tests/.tmp-behavior/
 .DS_Store
+editors/vscode/node_modules/

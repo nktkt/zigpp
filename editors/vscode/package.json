@@ -1,0 +1,45 @@
+{
+  "name": "zigpp",
+  "displayName": "Zig++",
+  "description": "Language support for Zig++ (.zpp): syntax highlighting and LSP diagnostics.",
+  "version": "0.0.1",
+  "publisher": "zigpp",
+  "license": "MIT",
+  "repository": { "type": "git", "url": "https://github.com/nktkt/zigpp" },
+  "engines": { "vscode": "^1.85.0" },
+  "categories": ["Programming Languages"],
+  "activationEvents": ["onLanguage:zigpp"],
+  "main": "./extension.js",
+  "contributes": {
+    "languages": [{
+      "id": "zigpp",
+      "aliases": ["Zig++", "zigpp"],
+      "extensions": [".zpp"],
+      "configuration": "./language-configuration.json"
+    }],
+    "grammars": [{
+      "language": "zigpp",
+      "scopeName": "source.zpp",
+      "path": "./syntaxes/zpp.tmLanguage.json"
+    }],
+    "configuration": {
+      "title": "Zig++",
+      "properties": {
+        "zigpp.serverPath": {
+          "type": "string",
+          "default": "zpp",
+          "description": "Path to the zpp executable. Defaults to looking up `zpp` on PATH."
+        },
+        "zigpp.serverArgs": {
+          "type": "array",
+          "items": { "type": "string" },
+          "default": ["lsp"],
+          "description": "Arguments passed to the server executable."
+        }
+      }
+    }
+  },
+  "dependencies": {
+    "vscode-languageclient": "^9.0.1"
+  }
+}

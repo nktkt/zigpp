@@ -1,0 +1,128 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "Zig++",
+  "scopeName": "source.zpp",
+  "patterns": [
+    { "include": "#comments" },
+    { "include": "#strings" },
+    { "include": "#chars" },
+    { "include": "#numbers" },
+    { "include": "#builtins" },
+    { "include": "#keywords" },
+    { "include": "#zigpp-keywords" },
+    { "include": "#storage" },
+    { "include": "#constants" },
+    { "include": "#function-definition" },
+    { "include": "#types" },
+    { "include": "#operators" }
+  ],
+  "repository": {
+    "comments": {
+      "patterns": [
+        {
+          "name": "comment.block.documentation.zpp",
+          "match": "//[/!].*$"
+        },
+        {
+          "name": "comment.line.double-slash.zpp",
+          "match": "//.*$"
+        },
+        {
+          "name": "comment.block.zpp",
+          "begin": "/\\*",
+          "end": "\\*/"
+        }
+      ]
+    },
+    "strings": {
+      "patterns": [
+        {
+          "name": "string.quoted.double.zpp",
+          "begin": "\"",
+          "end": "\"",
+          "patterns": [
+            {
+              "name": "constant.character.escape.zpp",
+              "match": "\\\\(x[0-9A-Fa-f]{2}|u\\{[0-9A-Fa-f]+\\}|[nrt'\"\\\\0])"
+            }
+          ]
+        },
+        {
+          "name": "string.quoted.multi.zpp",
+          "match": "\\\\\\\\.*$"
+        }
+      ]
+    },
+    "chars": {
+      "name": "string.quoted.single.zpp",
+      "match": "'(\\\\(x[0-9A-Fa-f]{2}|u\\{[0-9A-Fa-f]+\\}|[nrt'\"\\\\0])|[^'\\\\])'"
+    },
+    "numbers": {
+      "patterns": [
+        {
+          "name": "constant.numeric.hex.zpp",
+          "match": "\\b0x[0-9A-Fa-f_]+(\\.[0-9A-Fa-f_]+)?([pP][-+]?[0-9_]+)?\\b"
+        },
+        {
+          "name": "constant.numeric.binary.zpp",
+          "match": "\\b0b[01_]+\\b"
+        },
+        {
+          "name": "constant.numeric.octal.zpp",
+          "match": "\\b0o[0-7_]+\\b"
+        },
+        {
+          "name": "constant.numeric.float.zpp",
+          "match": "\\b[0-9][0-9_]*\\.[0-9_]+([eE][-+]?[0-9_]+)?\\b"
+        },
+        {
+          "name": "constant.numeric.zpp",
+          "match": "\\b[0-9][0-9_]*\\b"
+        }
+      ]
+    },
+    "builtins": {
+      "name": "support.function.builtin.zpp",
+      "match": "@[A-Za-z_][A-Za-z0-9_]*"
+    },
+    "keywords": {
+      "name": "keyword.control.zpp",
+      "match": "\\b(fn|return|if|else|while|for|defer|errdefer|try|catch|switch|break|continue|orelse|unreachable|test|asm|error|struct|enum|union|opaque|packed|inline|noinline|export|threadlocal|usingnamespace|and|or|const|var)\\b"
+    },
+    "zigpp-keywords": {
+      "name": "keyword.other.zigpp",
+      "match": "\\b(trait|impl|dyn|using|own|move|owned|effects|requires|ensures|invariant|derive|where|interface)\\b"
+    },
+    "storage": {
+      "name": "storage.modifier.zpp",
+      "match": "\\b(pub|extern|comptime|export|threadlocal|align|volatile|allowzero|noalias)\\b"
+    },
+    "constants": {
+      "name": "constant.language.zpp",
+      "match": "\\b(null|true|false|undefined)\\b"
+    },
+    "function-definition": {
+      "match": "\\b(fn)\\s+([A-Za-z_][A-Za-z0-9_]*)",
+      "captures": {
+        "1": { "name": "keyword.control.zpp" },
+        "2": { "name": "entity.name.function.zpp" }
+      }
+    },
+    "types": {
+      "patterns": [
+        {
+          "name": "support.type.primitive.zpp",
+          "match": "\\b(u(8|16|32|64|128|size)|i(8|16|32|64|128|size)|f(16|32|64|80|128)|bool|void|noreturn|anyopaque|anyerror|comptime_int|comptime_float|c_(char|short|int|long|longlong|ushort|uint|ulong|ulonglong|longdouble))\\b"
+        },
+        {
+          "name": "entity.name.type.zpp",
+          "match": "\\b[A-Z][A-Za-z0-9_]*\\b"
+        }
+      ]
+    },
+    "operators": {
+      "name": "keyword.operator.zpp",
+      "match": "(==|!=|<=|>=|=>|->|\\+=|-=|\\*=|/=|%=|<<=|>>=|&=|\\|=|\\^=|\\+\\+|--|<<|>>|&&|\\|\\||[=+\\-*/%<>!&|\\^~?])"
+    }
+  }
+}

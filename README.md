@@ -174,16 +174,24 @@ for the analyzer. Functions tagged `.noalloc` get a hidden-allocation check.
 
 ## Diagnostics
 
-Three real ownership/effect checks ship with this proof of concept:
+Five token-based ownership/effect checks ship with this proof of concept:
 
-| Code  | Meaning                                  | Detection                                                      |
-| ----- | ---------------------------------------- | -------------------------------------------------------------- |
-| E0001 | Owned value was not deinitialized        | `own var x = ...` with no matching `using x` or `x.deinit()`   |
-| E0002 | Owned value used after move              | Use of an identifier later than its `move` site, in same scope |
-| E0010 | Hidden allocation in `noalloc` function  | Allocator method calls or pass-through inside `effects(.noalloc)` body |
+| Code  | Meaning                                  | Detection                                                                                  |
+| ----- | ---------------------------------------- | ------------------------------------------------------------------------------------------ |
+| E0001 | Owned value was not deinitialized        | `own var x = ...` with no matching `using x` / `x.deinit()` / `move x` / `alloc.destroy(x)` |
+| E0002 | Owned value used after move              | Use of an identifier later than its `move` site, in the same scope                         |
+| E0003 | Owned value deinitialized twice          | Two or more `<name>.deinit()` calls per `own var <name>`, same scope                       |
+| E0004 | Allocator mismatch                       | `own var x = a.create(T); b.destroy(x);` — release allocator differs from create allocator |
+| E0010 | Hidden allocation in `noalloc` function  | Allocator method calls or pass-through inside `effects(.noalloc)` body                     |
+
+`zpp check <dir>` runs all five and prints `<path>:<line>:<col>: <code> <message>`.
+The same checks back the LSP server (`zpp lsp`), so editors with the bundled
+VS Code extension see findings in real time.
 
 These are token-stream checks, not a full semantic pass — sufficient for the
-fixture suite, intentionally limited otherwise.
+fixture suite, intentionally limited otherwise. E0020 (trait-not-implemented)
+is declared in the diagnostic namespace but not yet implemented; it would
+benefit from the AST refactor.
 
 ## Repo layout
 
@@ -223,9 +231,14 @@ zigpp/
 
 ```
 zig build               OK
-zig build test          OK   (52 inline tests across the compiler modules)
-zig build test-zpp      passed: 15  failed: 0  skipped: 0
+zig build test          OK   (~140 inline tests across the compiler / lib / LSP modules)
+zig build test-zpp      passed: 21  failed: 0  skipped: 0
 ```
+
+CI (Ubuntu + macOS, Zig 0.15.2) runs `zig build`, `zig build test`,
+`zig build test-zpp`, plus four end-to-end smoke tests on every push:
+`zpp run examples/hello_runnable`, `zpp check examples`, `zpp fmt --check .`,
+and the LSP `initialize` handshake.
 
 Categories exercised:
 
@@ -253,6 +266,12 @@ repo implements only the most load-bearing slice of it — enough to demonstrate
 that the pipeline works end-to-end and that the headline features (`using`,
 `trait`, `impl`, `dyn`, ownership/effect checks) can be lowered to plain Zig
 without invisible cost.
+
+## Editor support
+
+A minimal VS Code extension lives in [`editors/vscode/`](editors/vscode/). It registers `.zpp` syntax highlighting and connects to `zpp lsp` for real-time E0001 / E0002 / E0003 / E0004 / E0010 diagnostics.
+
+Install: see [editors/vscode/README.md](editors/vscode/README.md).
 
 ## License
 
