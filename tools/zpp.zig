@@ -32,7 +32,7 @@ const help_text =
     \\  check [path]        Run all sema checks (E0001/E0002/E0010) on a project, no codegen
     \\  lower <file.zpp>    Print the generated .zig to stdout (debug aid)
     \\  fmt [path]          Format .zpp sources (delegates to zpp_fmt)
-    \\  doc [path]          Generate documentation (delegates to zpp_doc)
+    \\  doc [path]          Generate a Markdown project reference under <path>/.zpp-doc/
     \\  migrate <path>      Rewrite Zig sources into idiomatic Zig++ (delegates to zpp_migrate)
     \\  version             Print the zpp version string
     \\  help, --help, -h    Print this help text
@@ -266,9 +266,26 @@ fn cmdFmt(allocator: std.mem.Allocator, args: []const []const u8) !void {
 }
 
 fn cmdDoc(allocator: std.mem.Allocator, args: []const []const u8) !void {
-    _ = allocator;
-    _ = args;
-    @panic("TODO: zpp doc not yet implemented (will call zpp_doc.run)");
+    const dir_path: []const u8 = if (args.len == 0) "." else args[0];
+
+    const stat = std.fs.cwd().statFile(dir_path) catch |err| switch (err) {
+        error.FileNotFound => {
+            // TODO: switch to stderr writer once API stabilizes
+            std.debug.print("zpp doc: no such directory: {s}\n", .{dir_path});
+            std.process.exit(2);
+        },
+        else => return err,
+    };
+    if (stat.kind != .directory) {
+        // TODO: switch to stderr writer once API stabilizes
+        std.debug.print("zpp doc: expected a directory, got file: {s}\n", .{dir_path});
+        std.process.exit(2);
+    }
+
+    const out_dir = try std.fs.path.join(allocator, &.{ dir_path, ".zpp-doc" });
+    defer allocator.free(out_dir);
+
+    try zpp_doc.run(allocator, dir_path, out_dir);
 }
 
 fn cmdMigrate(allocator: std.mem.Allocator, args: []const []const u8) !void {

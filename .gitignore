@@ -3,5 +3,7 @@ zig-out/
 **/.zig-cache/
 **/zig-out/
 **/.zpp-out/
+.zpp-doc/
+**/.zpp-doc/
 tests/.tmp-behavior/
 .DS_Store
