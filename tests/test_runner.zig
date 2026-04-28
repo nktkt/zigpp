@@ -205,6 +205,9 @@ fn runDiagnostics(
     if (std.mem.eql(u8, code, "E0002")) {
         return runCheck(allocator, writer, src, "E0002", zpp_lib.checks.checkUseAfterMove, "checkUseAfterMove");
     }
+    if (std.mem.eql(u8, code, "E0003")) {
+        return runCheck(allocator, writer, src, "E0003", zpp_lib.checks.checkDoubleDeinit, "checkDoubleDeinit");
+    }
     if (std.mem.eql(u8, code, "E0010")) {
         return runCheck(allocator, writer, src, "E0010", zpp_lib.checks.checkNoAlloc, "checkNoAlloc");
     }

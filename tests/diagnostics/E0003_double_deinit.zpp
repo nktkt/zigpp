@@ -1,0 +1,8 @@
+//! expect-error: E0003 owned value deinitialized twice
+const std = @import("std");
+
+pub fn doubleFree(allocator: std.mem.Allocator) !void {
+    own var x = try allocator.create(u32);
+    x.deinit();
+    x.deinit();
+}

@@ -29,7 +29,7 @@ const help_text =
     \\Subcommands:
     \\  build [path]        Compile a .zpp project (lowers .zpp -> .zig, then runs `zig build`)
     \\  run <file.zpp>      Build, then execute the resulting binary
-    \\  check [path]        Run all sema checks (E0001/E0002/E0010) on a project, no codegen
+    \\  check [path]        Run all sema checks (E0001/E0002/E0003/E0010) on a project, no codegen
     \\  lower <file.zpp>    Print the generated .zig to stdout (debug aid)
     \\  fmt [--check] [path]   Whitespace-only format .zpp files; --check reports without writing
     \\  doc [path]          Generate a Markdown project reference under <path>/.zpp-doc/
@@ -215,14 +215,17 @@ fn cmdCheck(allocator: std.mem.Allocator, args: []const []const u8) !void {
         defer allocator.free(own_findings);
         const move_findings = try checks.checkUseAfterMove(allocator, source);
         defer allocator.free(move_findings);
+        const double_findings = try checks.checkDoubleDeinit(allocator, source);
+        defer allocator.free(double_findings);
         const noalloc_findings = try checks.checkNoAlloc(allocator, source);
         defer allocator.free(noalloc_findings);
 
         for (own_findings) |f| try printFinding(file_path, f);
         for (move_findings) |f| try printFinding(file_path, f);
+        for (double_findings) |f| try printFinding(file_path, f);
         for (noalloc_findings) |f| try printFinding(file_path, f);
 
-        total_findings += own_findings.len + move_findings.len + noalloc_findings.len;
+        total_findings += own_findings.len + move_findings.len + double_findings.len + noalloc_findings.len;
     }
 
     // TODO: switch to stderr writer once API stabilizes

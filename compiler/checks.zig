@@ -271,6 +271,90 @@ pub fn checkUseAfterMove(allocator: std.mem.Allocator, source: []const u8) ![]Fi
     return findings.toOwnedSlice(allocator);
 }
 
+/// Scan `source` for double-deinit (E0003) violations.
+///
+/// Counts `<name>.deinit()` calls per `own var <name>` declaration within the
+/// same enclosing block; the 2nd and subsequent are flagged. Rebinding via
+/// `using` or `move` is NOT recognized as resetting the count — out of scope
+/// for this stub.
+///
+/// One finding per second-and-subsequent `<name>.deinit()` call. The finding
+/// is anchored at the call site (not the `own var` declaration) so the user
+/// sees where the bug manifests; the first deinit is correct, only later ones
+/// are bugs.
+///
+/// Caller owns the returned slice. `Finding.code` and `Finding.message` are
+/// pointers into static string literals — no per-element heap allocation.
+pub fn checkDoubleDeinit(allocator: std.mem.Allocator, source: []const u8) ![]Finding {
+    const tokens = try lexer.tokenize(allocator, source);
+    defer allocator.free(tokens);
+
+    var findings: std.ArrayListUnmanaged(Finding) = .{};
+    errdefer findings.deinit(allocator);
+
+    var i: usize = 0;
+    while (i < tokens.len) : (i += 1) {
+        const t = tokens[i];
+        if (t.kind != .kw_own) continue;
+
+        // Only `own var <ident>` is in scope; param-form `own b: T` and
+        // `own const` are skipped.
+        const next1_idx = nextNonTrivia(tokens, i + 1) orelse continue;
+        if (tokens[next1_idx].kind != .kw_var) continue;
+
+        const next2_idx = nextNonTrivia(tokens, next1_idx + 1) orelse continue;
+        if (tokens[next2_idx].kind != .ident) continue;
+
+        const name_tok = tokens[next2_idx];
+        const name = source[name_tok.start..name_tok.end];
+
+        const block = enclosingBlock(tokens, i) orelse continue;
+
+        // Count `<name>.deinit(` occurrences in the same enclosing block. The
+        // FIRST is the correct deinit; index >= 1 means "second or later" and
+        // produces a finding anchored at THAT call site.
+        var count: usize = 0;
+        var j: usize = block.open_idx + 1;
+        while (j < block.close_idx) : (j += 1) {
+            const tk = tokens[j];
+            if (tk.kind != .ident) continue;
+            if (!std.mem.eql(u8, source[tk.start..tk.end], name)) continue;
+
+            const dot_idx = nextNonTrivia(tokens, j + 1) orelse continue;
+            if (dot_idx >= block.close_idx) continue;
+            if (tokens[dot_idx].kind != .dot) continue;
+
+            const m_idx = nextNonTrivia(tokens, dot_idx + 1) orelse continue;
+            if (m_idx >= block.close_idx) continue;
+            const m_tok = tokens[m_idx];
+            if (m_tok.kind != .ident) continue;
+            if (!std.mem.eql(u8, source[m_tok.start..m_tok.end], "deinit")) continue;
+
+            const lp_idx = nextNonTrivia(tokens, m_idx + 1) orelse continue;
+            if (lp_idx >= block.close_idx) continue;
+            if (tokens[lp_idx].kind != .lparen) continue;
+
+            count += 1;
+            if (count >= 2) {
+                try findings.append(allocator, .{
+                    .code = diag.Code.owned_double_deinit,
+                    .message = "owned value deinitialized twice",
+                    .line = tk.line,
+                    .col = tk.col,
+                });
+            }
+            // Advance past the consumed `<name>.deinit(` shape.
+            j = lp_idx;
+        }
+
+        // Advance past the matched ident; the body scan does not need to
+        // re-examine these tokens for further `own var` shapes.
+        i = next2_idx;
+    }
+
+    return findings.toOwnedSlice(allocator);
+}
+
 /// Scan `source` for hidden allocations (E0010) inside functions tagged with
 /// `effects(.noalloc, ...)`.
 ///
@@ -923,4 +1007,116 @@ test "E0010: effects(.noalloc, .noio) still triggers analysis" {
     defer testing.allocator.free(findings);
     try testing.expect(findings.len >= 1);
     try testing.expectEqualStrings("E0010", findings[0].code);
+}
+
+test "E0003: exact fixture text produces one finding at second deinit" {
+    const src =
+        \\//! expect-error: E0003 owned value deinitialized twice
+        \\const std = @import("std");
+        \\
+        \\pub fn doubleFree(allocator: std.mem.Allocator) !void {
+        \\    own var x = try allocator.create(u32);
+        \\    x.deinit();
+        \\    x.deinit();
+        \\}
+    ;
+    const findings = try checkDoubleDeinit(testing.allocator, src);
+    defer testing.allocator.free(findings);
+    try testing.expectEqual(@as(usize, 1), findings.len);
+    try testing.expectEqualStrings("E0003", findings[0].code);
+    try testing.expectEqualStrings("owned value deinitialized twice", findings[0].message);
+    // The finding anchors on the SECOND `x.deinit();` (line 7 in the fixture),
+    // not the first call or the `own var` declaration.
+    try testing.expectEqual(@as(u32, 7), findings[0].line);
+}
+
+test "E0003: single deinit produces zero findings" {
+    const src =
+        \\pub fn ok(a: A) !void {
+        \\    own var x = try a.create(u32);
+        \\    x.deinit();
+        \\}
+    ;
+    const findings = try checkDoubleDeinit(testing.allocator, src);
+    defer testing.allocator.free(findings);
+    try testing.expectEqual(@as(usize, 0), findings.len);
+}
+
+test "E0003: three deinits produce two findings" {
+    const src =
+        \\pub fn oops(a: A) !void {
+        \\    own var x = try a.create(u32);
+        \\    x.deinit();
+        \\    x.deinit();
+        \\    x.deinit();
+        \\}
+    ;
+    const findings = try checkDoubleDeinit(testing.allocator, src);
+    defer testing.allocator.free(findings);
+    try testing.expectEqual(@as(usize, 2), findings.len);
+    try testing.expectEqualStrings("E0003", findings[0].code);
+    try testing.expectEqualStrings("E0003", findings[1].code);
+}
+
+test "E0003: two own vars each deinit'd once produce zero findings" {
+    const src =
+        \\pub fn ok(a: A) !void {
+        \\    own var x = try a.create(u32);
+        \\    own var y = try a.create(u32);
+        \\    x.deinit();
+        \\    y.deinit();
+        \\}
+    ;
+    const findings = try checkDoubleDeinit(testing.allocator, src);
+    defer testing.allocator.free(findings);
+    try testing.expectEqual(@as(usize, 0), findings.len);
+}
+
+test "E0003: two own vars each deinit'd twice produce two findings" {
+    const src =
+        \\pub fn oops(a: A) !void {
+        \\    own var x = try a.create(u32);
+        \\    own var y = try a.create(u32);
+        \\    x.deinit();
+        \\    y.deinit();
+        \\    x.deinit();
+        \\    y.deinit();
+        \\}
+    ;
+    const findings = try checkDoubleDeinit(testing.allocator, src);
+    defer testing.allocator.free(findings);
+    try testing.expectEqual(@as(usize, 2), findings.len);
+    try testing.expectEqualStrings("E0003", findings[0].code);
+    try testing.expectEqualStrings("E0003", findings[1].code);
+}
+
+test "E0003: deinit without preceding own var produces zero findings" {
+    const src =
+        \\pub fn fine(a: A) !void {
+        \\    var x = a;
+        \\    x.deinit();
+        \\    x.deinit();
+        \\}
+    ;
+    const findings = try checkDoubleDeinit(testing.allocator, src);
+    defer testing.allocator.free(findings);
+    try testing.expectEqual(@as(usize, 0), findings.len);
+}
+
+test "E0003: deinit in outer block is not counted against inner own var" {
+    // The `own var x` is scoped to the inner block; only the inner-block
+    // deinit is counted. The outer-block `x.deinit()` lives in a different
+    // enclosingBlock and is invisible to this check.
+    const src =
+        \\pub fn ok(a: A) !void {
+        \\    {
+        \\        own var x = try a.create(u32);
+        \\        x.deinit();
+        \\    }
+        \\    x.deinit();
+        \\}
+    ;
+    const findings = try checkDoubleDeinit(testing.allocator, src);
+    defer testing.allocator.free(findings);
+    try testing.expectEqual(@as(usize, 0), findings.len);
 }
