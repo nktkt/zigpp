@@ -273,6 +273,10 @@ A minimal VS Code extension lives in [`editors/vscode/`](editors/vscode/). It re
 
 Install: see [editors/vscode/README.md](editors/vscode/README.md).
 
+## Changelog
+
+See [CHANGELOG.md](CHANGELOG.md) for the development log.
+
 ## License
 
 MIT. See [LICENSE](LICENSE).
