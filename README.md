@@ -269,9 +269,13 @@ without invisible cost.
 
 ## Editor support
 
-A minimal VS Code extension lives in [`editors/vscode/`](editors/vscode/). It registers `.zpp` syntax highlighting and connects to `zpp lsp` for real-time E0001 / E0002 / E0003 / E0004 / E0010 diagnostics.
+Two minimal editor integrations live in [`editors/`](editors/), both backed
+by the same `zpp lsp` server (see [`tools/zpp_lsp.zig`](tools/zpp_lsp.zig)):
 
-Install: see [editors/vscode/README.md](editors/vscode/README.md).
+- [`editors/vscode/`](editors/vscode/) — VS Code extension. Install:
+  see [editors/vscode/README.md](editors/vscode/README.md).
+- [`editors/neovim/`](editors/neovim/) — Neovim plugin (Lua, Neovim 0.10+).
+  Install: see [editors/neovim/README.md](editors/neovim/README.md).
 
 ## Changelog
 
