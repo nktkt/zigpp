@@ -41,6 +41,12 @@ pub fn lowerDerives(allocator: std.mem.Allocator, source: []const u8) ![]u8 {
     var out = std.ArrayList(u8){};
     defer out.deinit(allocator);
 
+    // Track whether at least one derive postfix was actually rewritten —
+    // only then do we inject the `const zpp = @import("zpp");` runtime line.
+    // A bare `derive` identifier or a derive-shaped call we leave alone must
+    // NOT cause the injection.
+    var rewrote_any = false;
+
     // Cursor into `source` tracking what has been emitted so far.
     var src_cursor: usize = 0;
 
@@ -147,9 +153,24 @@ pub fn lowerDerives(allocator: std.mem.Allocator, source: []const u8) ![]u8 {
         // `derive(...);` suffix.
         src_cursor = tokens[semi_idx].end;
         ti = semi_idx; // outer `+= 1` advances past the semicolon
+        rewrote_any = true;
     }
 
     try out.appendSlice(allocator, source[src_cursor..]);
+
+    // If a derive was actually lowered, prepend `const zpp = @import("zpp");`
+    // unless the source already imports it (substring match suffices). The
+    // injection is purely a runtime-availability fix for the lowered output.
+    if (rewrote_any and std.mem.indexOf(u8, source, "const zpp = @import(\"zpp\");") == null) {
+        const body = try out.toOwnedSlice(allocator);
+        defer allocator.free(body);
+        var prefixed = std.ArrayList(u8){};
+        defer prefixed.deinit(allocator);
+        try prefixed.appendSlice(allocator, "const zpp = @import(\"zpp\");\n");
+        try prefixed.appendSlice(allocator, body);
+        return prefixed.toOwnedSlice(allocator);
+    }
+
     return out.toOwnedSlice(allocator);
 }
 
@@ -274,6 +295,7 @@ test "lowerDerives: single trait" {
         "    a: u32,\n" ++
         "} derive(.{ Hash });\n";
     const expected =
+        "const zpp = @import(\"zpp\");\n" ++
         "const X = struct {\n" ++
         "    a: u32,\n" ++
         "\n" ++
@@ -291,6 +313,7 @@ test "lowerDerives: three traits in declaration order" {
         "    name: []const u8,\n" ++
         "} derive(.{ Hash, Json, Debug });\n";
     const expected =
+        "const zpp = @import(\"zpp\");\n" ++
         "const User = struct {\n" ++
         "    id: u64,\n" ++
         "    name: []const u8,\n" ++
@@ -310,6 +333,7 @@ test "lowerDerives: trailing comma in trait list" {
         "    a: u32,\n" ++
         "} derive(.{ Hash, Json, });\n";
     const expected =
+        "const zpp = @import(\"zpp\");\n" ++
         "const X = struct {\n" ++
         "    a: u32,\n" ++
         "\n" ++
@@ -330,6 +354,7 @@ test "lowerDerives: multi-line trait list" {
         "    Json,\n" ++
         "});\n";
     const expected =
+        "const zpp = @import(\"zpp\");\n" ++
         "const X = struct {\n" ++
         "    a: u32,\n" ++
         "\n" ++
@@ -367,6 +392,7 @@ test "lowerDerives: two structs each with their own derive" {
         "    y: u32,\n" ++
         "} derive(.{ Json });\n";
     const expected =
+        "const zpp = @import(\"zpp\");\n" ++
         "const A = struct {\n" ++
         "    x: u32,\n" ++
         "\n" ++
@@ -392,6 +418,7 @@ test "lowerDerives: indented struct uses body field indent" {
         "        a: u32,\n" ++
         "    } derive(.{ Hash });\n";
     const expected =
+        "const zpp = @import(\"zpp\");\n" ++
         "    const X = struct {\n" ++
         "        a: u32,\n" ++
         "\n" ++
@@ -408,6 +435,7 @@ test "lowerDerives: PascalCase trait lowercases first char only" {
         "    a: u32,\n" ++
         "} derive(.{ MyDerive });\n";
     const expected =
+        "const zpp = @import(\"zpp\");\n" ++
         "const X = struct {\n" ++
         "    a: u32,\n" ++
         "\n" ++

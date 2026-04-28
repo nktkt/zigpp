@@ -1,3 +1,4 @@
+const zpp = @import("zpp");
 const User = struct {
     id: u64,
     name: []const u8,

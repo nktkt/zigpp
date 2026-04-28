@@ -1,0 +1,11 @@
+// expected stderr: debug ok\n
+const std = @import("std");
+
+const User = struct {
+    id: u32,
+} derive(.{ Debug });
+
+pub fn main() void {
+    const u = User{ .id = 1 };
+    User.debug.dump(u);
+}

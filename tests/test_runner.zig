@@ -283,28 +283,39 @@ fn printSnippet(writer: anytype, label: []const u8, s: []const u8) !void {
     try writer.print("\"\n", .{});
 }
 
-/// Hardcoded build.zig synthesized into each behavior fixture's tmp dir.
-/// Builds `.zpp-out/main.zig` as `behavior_test`. We deliberately don't expose
-/// a `run` step here — the runner spawns the produced binary directly so the
-/// captured stderr is the program's own output, free of `zig build`'s progress
-/// chatter.
-const synthesized_build_zig =
+/// Template for the build.zig synthesized into each behavior fixture's tmp
+/// dir. Builds `.zpp-out/main.zig` as `behavior_test`. We deliberately don't
+/// expose a `run` step that we use — the runner spawns the produced binary
+/// directly so the captured stderr is the program's own output, free of
+/// `zig build`'s progress chatter.
+///
+/// `{s}` is interpolated at write-time with the absolute path to
+/// `lib/zpp.zig` so the lowered code's `@import("zpp")` resolves regardless
+/// of where the tmp dir lives. We use `.cwd_relative` because the path is
+/// outside the tmp dir's build root, where `b.path` would be invalid.
+const synthesized_build_zig_template =
     \\const std = @import("std");
-    \\pub fn build(b: *std.Build) void {
-    \\    const target = b.standardTargetOptions(.{});
-    \\    const optimize = b.standardOptimizeOption(.{});
-    \\    const m = b.createModule(.{
+    \\pub fn build(b: *std.Build) void {{
+    \\    const target = b.standardTargetOptions(.{{}});
+    \\    const optimize = b.standardOptimizeOption(.{{}});
+    \\    const zpp_mod = b.createModule(.{{
+    \\        .root_source_file = .{{ .cwd_relative = "{s}" }},
+    \\        .target = target,
+    \\        .optimize = optimize,
+    \\    }});
+    \\    const m = b.createModule(.{{
     \\        .root_source_file = b.path(".zpp-out/main.zig"),
     \\        .target = target,
     \\        .optimize = optimize,
-    \\    });
-    \\    const exe = b.addExecutable(.{ .name = "behavior_test", .root_module = m });
+    \\    }});
+    \\    m.addImport("zpp", zpp_mod);
+    \\    const exe = b.addExecutable(.{{ .name = "behavior_test", .root_module = m }});
     \\    b.installArtifact(exe);
     \\    const run_cmd = b.addRunArtifact(exe);
     \\    run_cmd.step.dependOn(b.getInstallStep());
     \\    const run_step = b.step("run", "");
     \\    run_step.dependOn(&run_cmd.step);
-    \\}
+    \\}}
     \\
 ;
 
@@ -523,11 +534,24 @@ fn runBehavior(
         try f.writeAll(sanitized);
     }
     {
+        // The build.zig template references `lib/zpp.zig` by absolute path —
+        // the tmp dir is not a sibling of `lib/`, so a relative path inside
+        // the synthesized build root would not resolve. Compute it from cwd
+        // (set to the project root by build.zig) and free after writing.
+        const lib_zpp_abs = try std.fs.cwd().realpathAlloc(allocator, "lib/zpp.zig");
+        defer allocator.free(lib_zpp_abs);
+        const bz_contents = try std.fmt.allocPrint(
+            allocator,
+            synthesized_build_zig_template,
+            .{lib_zpp_abs},
+        );
+        defer allocator.free(bz_contents);
+
         const bz_path = try std.fmt.allocPrint(allocator, "{s}/build.zig", .{tmp_path});
         defer allocator.free(bz_path);
         const f = try std.fs.cwd().createFile(bz_path, .{ .truncate = true });
         defer f.close();
-        try f.writeAll(synthesized_build_zig);
+        try f.writeAll(bz_contents);
     }
     {
         const zon_path = try std.fmt.allocPrint(allocator, "{s}/build.zig.zon", .{tmp_path});
