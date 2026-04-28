@@ -1,0 +1,7 @@
+//! expect-error: E0004 allocator mismatch
+const std = @import("std");
+
+pub fn mixed(a: std.mem.Allocator, b: std.mem.Allocator) !void {
+    own var x = try a.create(u32);
+    b.destroy(x);
+}

@@ -1,7 +1,8 @@
 //! Language Server for Zig++. Drives an LSP loop over stdin/stdout, surfacing
 //! diagnostics from the compiler frontend (E0001 owned-not-deinit, E0002
-//! use-after-move, E0003 owned-double-deinit, E0010 hidden allocation in
-//! noalloc functions) via the `textDocument/diagnostic` pull model.
+//! use-after-move, E0003 owned-double-deinit, E0004 allocator mismatch,
+//! E0010 hidden allocation in noalloc functions) via the
+//! `textDocument/diagnostic` pull model.
 //!
 //! Scope is intentionally minimal:
 //!   - `initialize` / `initialized`     : handshake
@@ -317,7 +318,7 @@ fn writeMethodNotFound(
 // ---------------------------------------------------------------------------
 
 /// Handle a `textDocument/diagnostic` pull request. Resolves the document URI
-/// to a filesystem path, reads the file, runs all four sema checks, and
+/// to a filesystem path, reads the file, runs all five sema checks, and
 /// returns the union of findings as a `RelatedFullDocumentDiagnosticReport`.
 ///
 /// On any read or URI failure we return zero diagnostics rather than an error
@@ -367,7 +368,7 @@ fn writeDiagnosticResponse(
     try writeFramed(file, body);
 }
 
-/// Run all four sema checks on `source`, render each finding as an LSP
+/// Run all five sema checks on `source`, render each finding as an LSP
 /// `Diagnostic`, and return the JSON array (e.g. `[{...},{...}]`). Caller
 /// owns the returned slice.
 fn renderDiagnostics(allocator: std.mem.Allocator, source: []const u8) ![]u8 {
@@ -377,6 +378,8 @@ fn renderDiagnostics(allocator: std.mem.Allocator, source: []const u8) ![]u8 {
     defer if (move.len > 0) allocator.free(move);
     const double = checks.checkDoubleDeinit(allocator, source) catch &[_]checks.Finding{};
     defer if (double.len > 0) allocator.free(double);
+    const mismatch = checks.checkAllocatorMismatch(allocator, source) catch &[_]checks.Finding{};
+    defer if (mismatch.len > 0) allocator.free(mismatch);
     const noalloc = checks.checkNoAlloc(allocator, source) catch &[_]checks.Finding{};
     defer if (noalloc.len > 0) allocator.free(noalloc);
 
@@ -385,7 +388,7 @@ fn renderDiagnostics(allocator: std.mem.Allocator, source: []const u8) ![]u8 {
     try out.append(allocator, '[');
 
     var first = true;
-    for ([_][]const checks.Finding{ own, move, double, noalloc }) |group| {
+    for ([_][]const checks.Finding{ own, move, double, mismatch, noalloc }) |group| {
         for (group) |f| {
             if (!first) try out.append(allocator, ',');
             first = false;

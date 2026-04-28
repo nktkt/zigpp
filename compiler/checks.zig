@@ -197,6 +197,35 @@ fn isHandled(
             if (lp_idx >= close) continue;
             if (tokens[lp_idx].kind == .lparen) return true;
         }
+
+        // Pattern: `<allocator> . destroy ( <name>` or `<allocator> . free ( <name>`
+        // — allocator-mediated release also satisfies the deinit obligation.
+        // The leading ident may be any allocator binding; we identify the
+        // release call by method name and verify the first arg is `<name>`.
+        if (t.kind == .ident) {
+            const dot_idx = nextNonTrivia(tokens, j + 1) orelse continue;
+            if (dot_idx >= close) continue;
+            if (tokens[dot_idx].kind != .dot) continue;
+
+            const m_idx = nextNonTrivia(tokens, dot_idx + 1) orelse continue;
+            if (m_idx >= close) continue;
+            if (tokens[m_idx].kind != .ident) continue;
+            const method = source[tokens[m_idx].start..tokens[m_idx].end];
+            if (!std.mem.eql(u8, method, "destroy") and
+                !std.mem.eql(u8, method, "free")) continue;
+
+            const lp_idx = nextNonTrivia(tokens, m_idx + 1) orelse continue;
+            if (lp_idx >= close) continue;
+            if (tokens[lp_idx].kind != .lparen) continue;
+
+            const arg_idx = nextNonTrivia(tokens, lp_idx + 1) orelse continue;
+            if (arg_idx >= close) continue;
+            if (tokens[arg_idx].kind == .ident and
+                std.mem.eql(u8, source[tokens[arg_idx].start..tokens[arg_idx].end], name))
+            {
+                return true;
+            }
+        }
     }
     return false;
 }
@@ -710,6 +739,147 @@ fn isAllocMethod(name: []const u8) bool {
     return false;
 }
 
+/// Heuristic check: extracts the first `<ident>.<create-method>(` from the RHS
+/// of `own var <name> = ...;` as the create allocator, and looks for
+/// `<other>.destroy(<name>)` or `<other>.free(<name>...)` in the same scope.
+/// Mismatched allocator idents are flagged. Limitations: doesn't track
+/// allocator aliasing (`const a2 = a;`), doesn't follow function-call
+/// indirection, treats only the simple direct-call pattern.
+///
+/// Caller owns the returned slice. `Finding.code` and `Finding.message` point
+/// into static string literals — no per-element heap allocation.
+pub fn checkAllocatorMismatch(allocator: std.mem.Allocator, source: []const u8) ![]Finding {
+    const tokens = try lexer.tokenize(allocator, source);
+    defer allocator.free(tokens);
+
+    var findings: std.ArrayListUnmanaged(Finding) = .{};
+    errdefer findings.deinit(allocator);
+
+    var i: usize = 0;
+    while (i < tokens.len) : (i += 1) {
+        const t = tokens[i];
+        if (t.kind != .kw_own) continue;
+
+        // Only `own var <ident>` is in scope; param-form `own b: T` and
+        // `own const` are skipped.
+        const next1_idx = nextNonTrivia(tokens, i + 1) orelse continue;
+        if (tokens[next1_idx].kind != .kw_var) continue;
+
+        const next2_idx = nextNonTrivia(tokens, next1_idx + 1) orelse continue;
+        if (tokens[next2_idx].kind != .ident) continue;
+
+        const name_tok = tokens[next2_idx];
+        const name = source[name_tok.start..name_tok.end];
+
+        // Locate the `=` that starts the RHS, then the terminating `;`.
+        const eq_idx = nextNonTrivia(tokens, next2_idx + 1) orelse continue;
+        if (tokens[eq_idx].kind != .eq) {
+            i = next2_idx;
+            continue;
+        }
+        const semi_idx = findNext(tokens, eq_idx + 1, .semicolon) orelse continue;
+
+        // Treat the FIRST `<ident>.<create-method>(` triple in the RHS as the
+        // create allocator — anything later (e.g., a method on the result of
+        // an earlier call) is irrelevant for the heuristic.
+        var create_alloc: ?[]const u8 = null;
+        var k: usize = eq_idx + 1;
+        while (k < semi_idx) : (k += 1) {
+            const a = tokens[k];
+            if (a.kind != .ident) continue;
+            const dot_idx = nextNonTrivia(tokens, k + 1) orelse break;
+            if (dot_idx >= semi_idx) break;
+            if (tokens[dot_idx].kind != .dot) continue;
+            const m_idx = nextNonTrivia(tokens, dot_idx + 1) orelse break;
+            if (m_idx >= semi_idx) break;
+            if (tokens[m_idx].kind != .ident) continue;
+            const lp_idx = nextNonTrivia(tokens, m_idx + 1) orelse break;
+            if (lp_idx >= semi_idx) break;
+            if (tokens[lp_idx].kind != .lparen) continue;
+            const method = source[tokens[m_idx].start..tokens[m_idx].end];
+            if (!isAllocMethod(method)) continue;
+            create_alloc = source[a.start..a.end];
+            break;
+        }
+
+        if (create_alloc == null) {
+            i = next2_idx;
+            continue;
+        }
+        const create_alloc_text = create_alloc.?;
+
+        const block = enclosingBlock(tokens, i) orelse {
+            i = next2_idx;
+            continue;
+        };
+
+        // Scan the enclosing block for `<other>.destroy(<name>)` or
+        // `<other>.free(<name>...)`. Begin after the `own var` declaration so
+        // we don't accidentally flag tokens preceding it.
+        var j: usize = semi_idx + 1;
+        while (j < block.close_idx) : (j += 1) {
+            const tk = tokens[j];
+            if (tk.kind != .ident) continue;
+
+            const dot_idx = nextNonTrivia(tokens, j + 1) orelse break;
+            if (dot_idx >= block.close_idx) break;
+            if (tokens[dot_idx].kind != .dot) continue;
+
+            const m_idx = nextNonTrivia(tokens, dot_idx + 1) orelse break;
+            if (m_idx >= block.close_idx) break;
+            if (tokens[m_idx].kind != .ident) continue;
+            const method = source[tokens[m_idx].start..tokens[m_idx].end];
+            const is_destroy = std.mem.eql(u8, method, "destroy");
+            const is_free = std.mem.eql(u8, method, "free");
+            if (!is_destroy and !is_free) continue;
+
+            const lp_idx = nextNonTrivia(tokens, m_idx + 1) orelse break;
+            if (lp_idx >= block.close_idx) break;
+            if (tokens[lp_idx].kind != .lparen) continue;
+
+            // First arg ident: must be `<name>`. We accept `<name>`,
+            // `<name> .something`, `<name> ,`, `<name> )` — i.e. any token
+            // sequence that begins with the owned binding name.
+            const arg_idx = nextNonTrivia(tokens, lp_idx + 1) orelse break;
+            if (arg_idx >= block.close_idx) break;
+            if (tokens[arg_idx].kind != .ident) continue;
+            if (!std.mem.eql(u8, source[tokens[arg_idx].start..tokens[arg_idx].end], name)) continue;
+            if (is_destroy) {
+                // `destroy(<name>)` is the only accepted shape; bail if the
+                // next non-trivia is not `)`.
+                const after_idx = nextNonTrivia(tokens, arg_idx + 1) orelse break;
+                if (after_idx >= block.close_idx) break;
+                if (tokens[after_idx].kind != .rparen) continue;
+            } else {
+                // `free(<name>)` or `free(<name>.something(...))` — accept any
+                // continuation that immediately follows the name with `)`,
+                // `.`, or `,`.
+                const after_idx = nextNonTrivia(tokens, arg_idx + 1) orelse break;
+                if (after_idx >= block.close_idx) break;
+                const ak = tokens[after_idx].kind;
+                if (ak != .rparen and ak != .dot and ak != .comma) continue;
+            }
+
+            const other = source[tk.start..tk.end];
+            if (!std.mem.eql(u8, other, create_alloc_text)) {
+                try findings.append(allocator, .{
+                    .code = diag.Code.allocator_mismatch,
+                    .message = "allocator mismatch",
+                    .line = tk.line,
+                    .col = tk.col,
+                });
+            }
+            j = lp_idx;
+        }
+
+        // Advance past the matched ident; the body scan does not need to
+        // re-examine these tokens for further `own var` shapes.
+        i = next2_idx;
+    }
+
+    return findings.toOwnedSlice(allocator);
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -1117,6 +1287,122 @@ test "E0003: deinit in outer block is not counted against inner own var" {
         \\}
     ;
     const findings = try checkDoubleDeinit(testing.allocator, src);
+    defer testing.allocator.free(findings);
+    try testing.expectEqual(@as(usize, 0), findings.len);
+}
+
+test "E0004: exact fixture text produces one finding at b.destroy(" {
+    const src =
+        \\//! expect-error: E0004 allocator mismatch
+        \\const std = @import("std");
+        \\
+        \\pub fn mixed(a: std.mem.Allocator, b: std.mem.Allocator) !void {
+        \\    own var x = try a.create(u32);
+        \\    b.destroy(x);
+        \\}
+    ;
+    const findings = try checkAllocatorMismatch(testing.allocator, src);
+    defer testing.allocator.free(findings);
+    try testing.expectEqual(@as(usize, 1), findings.len);
+    try testing.expectEqualStrings("E0004", findings[0].code);
+    try testing.expectEqualStrings("allocator mismatch", findings[0].message);
+    // The finding anchors on the `b.destroy(` call site (line 6 in fixture),
+    // not the `own var` declaration on line 5.
+    try testing.expectEqual(@as(u32, 6), findings[0].line);
+}
+
+test "E0004: same allocator on both sides produces zero findings" {
+    const src =
+        \\pub fn ok(a: A) !void {
+        \\    own var x = try a.create(u32);
+        \\    a.destroy(x);
+        \\}
+    ;
+    const findings = try checkAllocatorMismatch(testing.allocator, src);
+    defer testing.allocator.free(findings);
+    try testing.expectEqual(@as(usize, 0), findings.len);
+}
+
+test "E0004: alloc + mismatched free is flagged" {
+    const src =
+        \\pub fn oops(a: A, b: A) !void {
+        \\    own var x = try a.alloc(u8, 8);
+        \\    b.free(x);
+        \\}
+    ;
+    const findings = try checkAllocatorMismatch(testing.allocator, src);
+    defer testing.allocator.free(findings);
+    try testing.expectEqual(@as(usize, 1), findings.len);
+    try testing.expectEqualStrings("E0004", findings[0].code);
+}
+
+test "E0004: correct destroy followed by mismatched destroy flags only the second" {
+    const src =
+        \\pub fn oops(a: A, b: A) !void {
+        \\    own var x = try a.create(u32);
+        \\    a.destroy(x);
+        \\    b.destroy(x);
+        \\}
+    ;
+    const findings = try checkAllocatorMismatch(testing.allocator, src);
+    defer testing.allocator.free(findings);
+    try testing.expectEqual(@as(usize, 1), findings.len);
+    try testing.expectEqualStrings("E0004", findings[0].code);
+    // Anchored at the SECOND destroy (line 4), not the first.
+    try testing.expectEqual(@as(u32, 4), findings[0].line);
+}
+
+test "E0004: RHS without create-method call is skipped" {
+    const src =
+        \\pub fn ok(a: A) !void {
+        \\    own var x = someFn();
+        \\    b.destroy(x);
+        \\}
+    ;
+    const findings = try checkAllocatorMismatch(testing.allocator, src);
+    defer testing.allocator.free(findings);
+    try testing.expectEqual(@as(usize, 0), findings.len);
+}
+
+test "E0004: two own vars each correctly destroyed produce zero findings" {
+    const src =
+        \\pub fn ok(a: A, b: A) !void {
+        \\    own var x = try a.create(u32);
+        \\    own var y = try b.create(u32);
+        \\    a.destroy(x);
+        \\    b.destroy(y);
+        \\}
+    ;
+    const findings = try checkAllocatorMismatch(testing.allocator, src);
+    defer testing.allocator.free(findings);
+    try testing.expectEqual(@as(usize, 0), findings.len);
+}
+
+test "E0004: two own vars destroyed by the other's allocator produce two findings" {
+    const src =
+        \\pub fn oops(a: A, b: A) !void {
+        \\    own var x = try a.create(u32);
+        \\    own var y = try b.create(u32);
+        \\    b.destroy(x);
+        \\    a.destroy(y);
+        \\}
+    ;
+    const findings = try checkAllocatorMismatch(testing.allocator, src);
+    defer testing.allocator.free(findings);
+    try testing.expectEqual(@as(usize, 2), findings.len);
+    try testing.expectEqualStrings("E0004", findings[0].code);
+    try testing.expectEqualStrings("E0004", findings[1].code);
+}
+
+test "E0004: own var with no destroy/free in scope produces zero findings" {
+    // Out of scope for E0004 — E0001 (owned-not-deinit) handles unmatched.
+    const src =
+        \\pub fn leaky(a: A) !void {
+        \\    own var x = try a.create(u32);
+        \\    _ = x;
+        \\}
+    ;
+    const findings = try checkAllocatorMismatch(testing.allocator, src);
     defer testing.allocator.free(findings);
     try testing.expectEqual(@as(usize, 0), findings.len);
 }
