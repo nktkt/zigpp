@@ -34,6 +34,7 @@ const help_text =
     \\  fmt [--check] [path]   Whitespace-only format .zpp files; --check reports without writing
     \\  doc [path]          Generate a Markdown project reference under <path>/.zpp-doc/
     \\  migrate [--apply] [path]   Suggest (or apply) Zig -> Zig++ rewrites under <path>
+    \\  lsp                 Start a Language Server speaking LSP over stdio
     \\  version             Print the zpp version string
     \\  help, --help, -h    Print this help text
     \\
@@ -73,6 +74,7 @@ pub fn main() !void {
     if (std.mem.eql(u8, sub, "fmt")) return cmdFmt(allocator, rest);
     if (std.mem.eql(u8, sub, "doc")) return cmdDoc(allocator, rest);
     if (std.mem.eql(u8, sub, "migrate")) return cmdMigrate(allocator, rest);
+    if (std.mem.eql(u8, sub, "lsp")) return cmdLsp(allocator, rest);
 
     try printHelp();
     std.process.exit(2);
@@ -310,4 +312,9 @@ fn cmdMigrate(allocator: std.mem.Allocator, args: []const []const u8) !void {
     }
     const code = try zpp_migrate.run(allocator, &.{path}, dry_run);
     std.process.exit(code);
+}
+
+fn cmdLsp(allocator: std.mem.Allocator, args: []const []const u8) !void {
+    _ = args;
+    try zpp_lsp.run(allocator);
 }

@@ -61,3 +61,13 @@ jobs:
 
       - name: smoke - zpp check examples (must be clean)
         run: ./zig-out/bin/zpp check examples
+
+      - name: smoke - zpp fmt --check .
+        run: ./zig-out/bin/zpp fmt --check .
+
+      - name: smoke - zpp lsp initialize handshake
+        run: |
+          content='{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"processId":null,"rootUri":null,"capabilities":{}}}'
+          len=$(printf '%s' "$content" | wc -c)
+          out=$(printf 'Content-Length: %d\r\n\r\n%s' "$len" "$content" | ./zig-out/bin/zpp lsp 2>/dev/null)
+          echo "$out" | grep -q '"capabilities"'
