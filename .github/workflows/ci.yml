@@ -1,0 +1,63 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: build + test (zig 0.15.2, ${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Zig 0.15.2
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.15.2
+
+      - name: Cache zig artifacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            .zig-cache
+            ~/.cache/zig
+          key: ${{ runner.os }}-zig-0.15.2-${{ hashFiles('build.zig', 'build.zig.zon') }}
+          restore-keys: |
+            ${{ runner.os }}-zig-0.15.2-
+
+      - name: zig version
+        run: zig version
+
+      - name: zig build
+        run: zig build
+
+      - name: zig build test
+        run: zig build test
+
+      - name: zig build test-zpp
+        run: zig build test-zpp
+
+      - name: smoke - zpp run examples/hello_runnable
+        run: |
+          out=$(./zig-out/bin/zpp run examples/hello_runnable 2>&1)
+          echo "$out"
+          echo "$out" | grep -q 'hello, zigpp!'
+
+      - name: smoke - zpp check examples (must be clean)
+        run: ./zig-out/bin/zpp check examples

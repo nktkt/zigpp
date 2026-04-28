@@ -1,5 +1,7 @@
 # Zig++
 
+[![ci](https://github.com/nktkt/zigpp/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/nktkt/zigpp/actions/workflows/ci.yml)
+
 A research-stage frontend compiler that lowers `.zpp` source — Zig with extra
 language affordances — into plain `.zig` and hands it off to the upstream Zig
 toolchain.
