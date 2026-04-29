@@ -3,8 +3,14 @@
 //! `zpp` module so that lowered references like `zpp.derive.Hash(@This())`
 //! resolve.
 
+pub const contracts = @import("contracts.zig");
 pub const derive = @import("derive.zig");
 pub const owned = @import("owned.zig");
-pub const contracts = @import("contracts.zig");
 // `async` is a reserved keyword in Zig, so the field is named `tasks`.
 pub const tasks = @import("async.zig");
+pub const testing = @import("testing.zig");
+pub const traits = @import("traits.zig");
+
+test {
+    @import("std").testing.refAllDecls(@This());
+}

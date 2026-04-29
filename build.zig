@@ -57,8 +57,19 @@ pub fn build(b: *std.Build) void {
     const unit_tests = b.addTest(.{ .root_module = tests_module });
     const run_tests = b.addRunArtifact(unit_tests);
 
+    // Runtime support library tests (lib/owned, contracts, derive, async,
+    // traits, testing). Wired through lib/zpp.zig's `refAllDecls`.
+    const lib_tests_module = b.createModule(.{
+        .root_source_file = b.path("lib/zpp.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const lib_unit_tests = b.addTest(.{ .root_module = lib_tests_module });
+    const run_lib_tests = b.addRunArtifact(lib_unit_tests);
+
     const test_step = b.step("test", "Run all Zig++ unit tests");
     test_step.dependOn(&run_tests.step);
+    test_step.dependOn(&run_lib_tests.step);
 
     // Integration test runner: walks tests/{compile,behavior,...} and emits
     // RUN/SKIP lines for each .zpp fixture. Not installed — it's a test driver.
