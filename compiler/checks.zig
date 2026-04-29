@@ -880,6 +880,292 @@ pub fn checkAllocatorMismatch(allocator: std.mem.Allocator, source: []const u8) 
     return findings.toOwnedSlice(allocator);
 }
 
+/// Scan `source` for unimplemented-trait (E0020) violations at `Trait.from(&v)`
+/// call sites.
+///
+/// The check is purely token-based and single-file:
+///
+///   1. Build a trait method table by scanning every `trait <Name> { fn m1...;
+///      fn m2...; ... }` block. `extern interface <Name> { ... }` is also
+///      recognized as a trait declaration — it lowers to the same VTable
+///      shape, and the same conformance question applies.
+///
+///   2. Build a struct decl-method table by scanning every `const <T> = struct
+///      { ... }` and `var <T> = struct { ... }`. Inside the struct body, both
+///      `pub fn <name>` and bare `fn <name>` are recorded.
+///
+///   3. Build a binding map: `var x = <TypeName>{ ... };` and
+///      `const x = <TypeName>{ ... };` patterns map `x -> TypeName`. Aliasing
+///      forms (`const y = x;`, function-call results) are intentionally NOT
+///      tracked — see "limitations" below.
+///
+///   4. For every `<TraitName> . from ( & <var> )` call site, resolve
+///      `var -> TypeName -> impl_method_set`. Compute `missing = trait_methods
+///      - impl_methods`. If non-empty, emit one Finding anchored at the
+///      TraitName token (i.e., the call site).
+///
+/// Method-name presence is the only conformance check performed. Signature
+/// equivalence — return type, parameter types, mutability of `self` — is NOT
+/// verified here; it's the runtime/comptime job of `lib/traits.zig::implements`,
+/// which is invoked by the lowered `Trait.from` shim. This stub matches the
+/// same simplification level: we catch the common "forgot to add `boop`" shape
+/// at lint time, and let the comptime checker catch deeper signature mismatches.
+///
+/// Known limitations:
+///   - Cross-file: if the trait OR the struct is declared in another file, the
+///     binding still resolves but the missing-name set is empty (or the trait
+///     is unknown), so we emit nothing — never a false positive.
+///   - Aliasing: `const x = otherVar; Trait.from(&x);` — `x` is not bound to a
+///     struct literal, so the binding map has no entry and the call is skipped.
+///   - Function-parameter impls: `fn f(impl: *T) { Trait.from(impl); }` — `impl`
+///     never appears in a `var = TypeName{` form, so it's skipped silently.
+///   - VTable shape / signature equivalence: out of scope; see above.
+///
+/// Caller owns the returned slice. `Finding.code` and `Finding.message` are
+/// pointers into static string literals — no per-element heap allocation.
+pub fn checkTraitImpl(allocator: std.mem.Allocator, source: []const u8) ![]Finding {
+    const tokens = try lexer.tokenize(allocator, source);
+    defer allocator.free(tokens);
+
+    var findings: std.ArrayListUnmanaged(Finding) = .{};
+    errdefer findings.deinit(allocator);
+
+    // Pass 1: traits. trait_names[i] -> trait_methods[i] (a list of method names).
+    var trait_names: std.ArrayListUnmanaged([]const u8) = .{};
+    defer trait_names.deinit(allocator);
+    var trait_methods: std.ArrayListUnmanaged(std.ArrayListUnmanaged([]const u8)) = .{};
+    defer {
+        for (trait_methods.items) |*list| list.deinit(allocator);
+        trait_methods.deinit(allocator);
+    }
+
+    var i: usize = 0;
+    while (i < tokens.len) : (i += 1) {
+        const t = tokens[i];
+        // Recognize `trait <Name> { ... }` and `extern interface <Name> { ... }`.
+        var name_idx_opt: ?usize = null;
+        if (t.kind == .kw_trait) {
+            const n_idx = nextNonTrivia(tokens, i + 1) orelse continue;
+            if (tokens[n_idx].kind != .ident) continue;
+            name_idx_opt = n_idx;
+        } else if (t.kind == .kw_extern) {
+            const if_idx = nextNonTrivia(tokens, i + 1) orelse continue;
+            if (tokens[if_idx].kind != .kw_interface) continue;
+            const n_idx = nextNonTrivia(tokens, if_idx + 1) orelse continue;
+            if (tokens[n_idx].kind != .ident) continue;
+            name_idx_opt = n_idx;
+        } else continue;
+
+        const name_idx = name_idx_opt.?;
+        const lb_idx = nextNonTrivia(tokens, name_idx + 1) orelse continue;
+        if (tokens[lb_idx].kind != .lbrace) continue;
+        const rb_idx = matchBrace(tokens, lb_idx) orelse continue;
+
+        const trait_name = source[tokens[name_idx].start..tokens[name_idx].end];
+        var methods: std.ArrayListUnmanaged([]const u8) = .{};
+        // collectFnNamesInBlock appends method names found at top level of
+        // the brace body; nested fn (which traits can't have) would not occur.
+        try collectFnNamesInBlock(allocator, &methods, tokens, source, lb_idx, rb_idx);
+        try trait_names.append(allocator, trait_name);
+        try trait_methods.append(allocator, methods);
+
+        i = rb_idx;
+    }
+
+    // Pass 2: structs. struct_names[i] -> struct_methods[i].
+    var struct_names: std.ArrayListUnmanaged([]const u8) = .{};
+    defer struct_names.deinit(allocator);
+    var struct_methods: std.ArrayListUnmanaged(std.ArrayListUnmanaged([]const u8)) = .{};
+    defer {
+        for (struct_methods.items) |*list| list.deinit(allocator);
+        struct_methods.deinit(allocator);
+    }
+
+    i = 0;
+    while (i < tokens.len) : (i += 1) {
+        const t = tokens[i];
+        // `const <Name> = struct { ... }` or `var <Name> = struct { ... }`.
+        if (t.kind != .kw_const and t.kind != .kw_var) continue;
+        const n_idx = nextNonTrivia(tokens, i + 1) orelse continue;
+        if (tokens[n_idx].kind != .ident) continue;
+        const eq_idx = nextNonTrivia(tokens, n_idx + 1) orelse continue;
+        if (tokens[eq_idx].kind != .eq) continue;
+        const s_idx = nextNonTrivia(tokens, eq_idx + 1) orelse continue;
+        if (tokens[s_idx].kind != .kw_struct) continue;
+        const lb_idx = nextNonTrivia(tokens, s_idx + 1) orelse continue;
+        if (tokens[lb_idx].kind != .lbrace) continue;
+        const rb_idx = matchBrace(tokens, lb_idx) orelse continue;
+
+        const sname = source[tokens[n_idx].start..tokens[n_idx].end];
+        var methods: std.ArrayListUnmanaged([]const u8) = .{};
+        try collectFnNamesInBlock(allocator, &methods, tokens, source, lb_idx, rb_idx);
+        try struct_names.append(allocator, sname);
+        try struct_methods.append(allocator, methods);
+
+        i = rb_idx;
+    }
+
+    // Pass 3: bindings. binding_vars[i] -> binding_types[i].
+    var binding_vars: std.ArrayListUnmanaged([]const u8) = .{};
+    defer binding_vars.deinit(allocator);
+    var binding_types: std.ArrayListUnmanaged([]const u8) = .{};
+    defer binding_types.deinit(allocator);
+
+    i = 0;
+    while (i < tokens.len) : (i += 1) {
+        const t = tokens[i];
+        if (t.kind != .kw_var and t.kind != .kw_const) continue;
+        const n_idx = nextNonTrivia(tokens, i + 1) orelse continue;
+        // Accept ident OR any Zig++ contextual keyword as a binding name.
+        // Zig++ adds keywords like `impl`, `derive`, `effects`, etc., and the
+        // target fixture relies on `impl` being usable as a variable name —
+        // the lexer tags it `kw_impl`, but in the binding-LHS position it's
+        // just a name. A regular `.ident` is also accepted.
+        if (!isNameLike(tokens[n_idx].kind)) continue;
+        const eq_idx = nextNonTrivia(tokens, n_idx + 1) orelse continue;
+        if (tokens[eq_idx].kind != .eq) continue;
+        const ty_idx = nextNonTrivia(tokens, eq_idx + 1) orelse continue;
+        if (tokens[ty_idx].kind != .ident) continue;
+        const lb_idx = nextNonTrivia(tokens, ty_idx + 1) orelse continue;
+        if (tokens[lb_idx].kind != .lbrace) continue;
+        // Avoid recording struct decls themselves: `const Foo = struct {` was
+        // handled in pass 2; here we're after `const x = TypeName {`. The
+        // distinguishing factor is that `kw_struct` would have appeared at
+        // ty_idx, not `ident` — already filtered.
+        const var_name = source[tokens[n_idx].start..tokens[n_idx].end];
+        const ty_name = source[tokens[ty_idx].start..tokens[ty_idx].end];
+        try binding_vars.append(allocator, var_name);
+        try binding_types.append(allocator, ty_name);
+    }
+
+    // Pass 4: call sites. `<TraitName> . from ( & <var> )`.
+    i = 0;
+    while (i < tokens.len) : (i += 1) {
+        const t = tokens[i];
+        if (t.kind != .ident) continue;
+        const trait_name_text = source[t.start..t.end];
+        const trait_idx = findInList(trait_names.items, trait_name_text) orelse continue;
+
+        const dot_idx = nextNonTrivia(tokens, i + 1) orelse continue;
+        if (tokens[dot_idx].kind != .dot) continue;
+        const m_idx = nextNonTrivia(tokens, dot_idx + 1) orelse continue;
+        if (tokens[m_idx].kind != .ident) continue;
+        if (!std.mem.eql(u8, source[tokens[m_idx].start..tokens[m_idx].end], "from")) continue;
+        const lp_idx = nextNonTrivia(tokens, m_idx + 1) orelse continue;
+        if (tokens[lp_idx].kind != .lparen) continue;
+        const amp_idx = nextNonTrivia(tokens, lp_idx + 1) orelse continue;
+        if (tokens[amp_idx].kind != .amp) continue;
+        const var_idx = nextNonTrivia(tokens, amp_idx + 1) orelse continue;
+        // Accept ident OR Zig++ contextual keywords as the variable name —
+        // see Pass 3 for the same allowance.
+        if (!isNameLike(tokens[var_idx].kind)) continue;
+        const rp_idx = nextNonTrivia(tokens, var_idx + 1) orelse continue;
+        if (tokens[rp_idx].kind != .rparen) continue;
+
+        const var_name = source[tokens[var_idx].start..tokens[var_idx].end];
+        const b_idx = findInList(binding_vars.items, var_name) orelse continue;
+        const ty_name = binding_types.items[b_idx];
+        const s_idx = findInList(struct_names.items, ty_name) orelse continue;
+
+        // Compute `missing = trait_methods - impl_methods`. Method-name-only
+        // comparison; signature equivalence is left to comptime in the lowered
+        // `Trait.from` shim (see lib/traits.zig::implements).
+        const trait_ms = trait_methods.items[trait_idx].items;
+        const impl_ms = struct_methods.items[s_idx].items;
+        var missing: bool = false;
+        for (trait_ms) |tm| {
+            if (!identInList(tm, impl_ms)) {
+                missing = true;
+                break;
+            }
+        }
+        if (missing) {
+            try findings.append(allocator, .{
+                .code = diag.Code.trait_not_implemented,
+                .message = "trait not implemented",
+                .line = t.line,
+                .col = t.col,
+            });
+        }
+
+        i = rp_idx;
+    }
+
+    return findings.toOwnedSlice(allocator);
+}
+
+/// Scan the brace-bounded range `(open, close)` and append the identifier
+/// after every top-level `pub fn` or `fn` keyword. Method bodies are skipped
+/// via brace-depth counting — only declarations whose `kw_fn` lives at
+/// depth 0 (relative to `open`) are recorded. Allocation occurs in `out`.
+fn collectFnNamesInBlock(
+    allocator: std.mem.Allocator,
+    out: *std.ArrayListUnmanaged([]const u8),
+    tokens: []const Token,
+    source: []const u8,
+    open: usize,
+    close: usize,
+) !void {
+    var depth: i32 = 0;
+    var k: usize = open + 1;
+    while (k < close) : (k += 1) {
+        const t = tokens[k];
+        if (t.kind == .lbrace) {
+            depth += 1;
+            continue;
+        }
+        if (t.kind == .rbrace) {
+            depth -= 1;
+            continue;
+        }
+        if (depth != 0) continue;
+        if (t.kind != .kw_fn) continue;
+        // Allow an optional leading `pub` — the kw_pub check happens against
+        // the previous non-trivia token, but we don't need to verify it: any
+        // `fn <ident>` at depth 0 is a method declaration, with or without `pub`.
+        const n_idx = nextNonTrivia(tokens, k + 1) orelse continue;
+        if (n_idx >= close) continue;
+        if (tokens[n_idx].kind != .ident) continue;
+        try out.append(allocator, source[tokens[n_idx].start..tokens[n_idx].end]);
+    }
+}
+
+/// Linear lookup: returns the index of `name` in `list`, or null. Used in
+/// place of a hash map because the lists are tiny (a typical fixture has
+/// fewer than 10 traits/structs/bindings); the constant factor wins.
+fn findInList(list: []const []const u8, name: []const u8) ?usize {
+    for (list, 0..) |n, idx| {
+        if (std.mem.eql(u8, n, name)) return idx;
+    }
+    return null;
+}
+
+/// True if `kind` could appear in source as a binding name. Returns true for
+/// `.ident` plus every Zig++ contextual keyword (e.g. `impl`, `derive`,
+/// `effects`, `where`) — the target fixture binds `var impl = ...`, which
+/// the lexer tags `kw_impl`. Zig-subset keywords (`var`, `const`, `fn`, ...)
+/// are excluded because they cannot appear as bare names in this position.
+fn isNameLike(kind: TokenKind) bool {
+    return switch (kind) {
+        .ident,
+        .kw_trait,
+        .kw_impl,
+        .kw_dyn,
+        .kw_using,
+        .kw_own,
+        .kw_move,
+        .kw_effects,
+        .kw_requires,
+        .kw_ensures,
+        .kw_invariant,
+        .kw_derive,
+        .kw_where,
+        .kw_interface,
+        => true,
+        else => false,
+    };
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -1405,4 +1691,180 @@ test "E0004: own var with no destroy/free in scope produces zero findings" {
     const findings = try checkAllocatorMismatch(testing.allocator, src);
     defer testing.allocator.free(findings);
     try testing.expectEqual(@as(usize, 0), findings.len);
+}
+
+test "E0020: exact fixture text produces an E0020 finding at the call site" {
+    const src =
+        \\//! expect-error: E0020 trait not implemented
+        \\const std = @import("std");
+        \\
+        \\trait Beeper {
+        \\    fn beep(self) void;
+        \\    fn boop(self) void;
+        \\}
+        \\
+        \\const HalfImpl = struct {
+        \\    pub fn beep(self: *HalfImpl) void {
+        \\        _ = self;
+        \\    }
+        \\    // missing: boop
+        \\};
+        \\
+        \\pub fn main() !void {
+        \\    var impl = HalfImpl{};
+        \\    const b: Beeper = Beeper.from(&impl);
+        \\    _ = b;
+        \\}
+    ;
+    const findings = try checkTraitImpl(testing.allocator, src);
+    defer testing.allocator.free(findings);
+    try testing.expect(findings.len >= 1);
+    var saw_e0020 = false;
+    for (findings) |f| {
+        if (std.mem.eql(u8, f.code, "E0020")) saw_e0020 = true;
+    }
+    try testing.expect(saw_e0020);
+    // The call site is on the line with `Beeper.from(&impl)` — the second
+    // `Beeper` in `const b: Beeper = Beeper.from(&impl);` (column > 1).
+    try testing.expect(findings[0].line >= 17);
+}
+
+test "E0020: full impl produces zero findings" {
+    const src =
+        \\trait Beeper {
+        \\    fn beep(self) void;
+        \\    fn boop(self) void;
+        \\}
+        \\
+        \\const FullImpl = struct {
+        \\    pub fn beep(self: *FullImpl) void { _ = self; }
+        \\    pub fn boop(self: *FullImpl) void { _ = self; }
+        \\};
+        \\
+        \\pub fn main() !void {
+        \\    var impl = FullImpl{};
+        \\    const b: Beeper = Beeper.from(&impl);
+        \\    _ = b;
+        \\}
+    ;
+    const findings = try checkTraitImpl(testing.allocator, src);
+    defer testing.allocator.free(findings);
+    try testing.expectEqual(@as(usize, 0), findings.len);
+}
+
+test "E0020: single-method trait satisfied by single-method struct" {
+    const src =
+        \\trait One {
+        \\    fn solo(self) void;
+        \\}
+        \\
+        \\const Impl = struct {
+        \\    pub fn solo(self: *Impl) void { _ = self; }
+        \\};
+        \\
+        \\pub fn main() !void {
+        \\    var x = Impl{};
+        \\    const o: One = One.from(&x);
+        \\    _ = o;
+        \\}
+    ;
+    const findings = try checkTraitImpl(testing.allocator, src);
+    defer testing.allocator.free(findings);
+    try testing.expectEqual(@as(usize, 0), findings.len);
+}
+
+test "E0020: unresolved binding (RHS not a struct literal) is silently skipped" {
+    // `var x = someFn();` — we can't resolve x's type from a token-only view,
+    // so we skip rather than emit a (possibly false) finding.
+    const src =
+        \\trait T {
+        \\    fn m(self) void;
+        \\}
+        \\
+        \\pub fn main() !void {
+        \\    var x = someFn();
+        \\    const t: T = T.from(&x);
+        \\    _ = t;
+        \\}
+    ;
+    const findings = try checkTraitImpl(testing.allocator, src);
+    defer testing.allocator.free(findings);
+    try testing.expectEqual(@as(usize, 0), findings.len);
+}
+
+test "E0020: trait declared cross-file is silently skipped" {
+    // The trait identifier `Unknown` doesn't appear in this file, so the
+    // call site isn't recognized as a trait `from` invocation at all and
+    // no finding is emitted.
+    const src =
+        \\const Foo = struct {
+        \\    pub fn beep(self: *Foo) void { _ = self; }
+        \\};
+        \\
+        \\pub fn main() !void {
+        \\    var x = Foo{};
+        \\    const u = Unknown.from(&x);
+        \\    _ = u;
+        \\}
+    ;
+    const findings = try checkTraitImpl(testing.allocator, src);
+    defer testing.allocator.free(findings);
+    try testing.expectEqual(@as(usize, 0), findings.len);
+}
+
+test "E0020: two traits checked independently against their respective impls" {
+    const src =
+        \\trait A {
+        \\    fn a1(self) void;
+        \\}
+        \\trait B {
+        \\    fn b1(self) void;
+        \\    fn b2(self) void;
+        \\}
+        \\
+        \\const Aimpl = struct {
+        \\    pub fn a1(self: *Aimpl) void { _ = self; }
+        \\};
+        \\const Bimpl = struct {
+        \\    pub fn b1(self: *Bimpl) void { _ = self; }
+        \\    // missing: b2
+        \\};
+        \\
+        \\pub fn main() !void {
+        \\    var x = Aimpl{};
+        \\    var y = Bimpl{};
+        \\    const a: A = A.from(&x);
+        \\    const b: B = B.from(&y);
+        \\    _ = a;
+        \\    _ = b;
+        \\}
+    ;
+    const findings = try checkTraitImpl(testing.allocator, src);
+    defer testing.allocator.free(findings);
+    try testing.expectEqual(@as(usize, 1), findings.len);
+    try testing.expectEqualStrings("E0020", findings[0].code);
+}
+
+test "E0020: extern interface is recognized as a trait declaration" {
+    const src =
+        \\extern interface Iface {
+        \\    fn m1(self) void;
+        \\    fn m2(self) void;
+        \\}
+        \\
+        \\const Half = struct {
+        \\    pub fn m1(self: *Half) void { _ = self; }
+        \\    // missing: m2
+        \\};
+        \\
+        \\pub fn main() !void {
+        \\    var x = Half{};
+        \\    const h: Iface = Iface.from(&x);
+        \\    _ = h;
+        \\}
+    ;
+    const findings = try checkTraitImpl(testing.allocator, src);
+    defer testing.allocator.free(findings);
+    try testing.expect(findings.len >= 1);
+    try testing.expectEqualStrings("E0020", findings[0].code);
 }

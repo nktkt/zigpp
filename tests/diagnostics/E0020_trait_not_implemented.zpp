@@ -1,0 +1,20 @@
+//! expect-error: E0020 trait not implemented
+const std = @import("std");
+
+trait Beeper {
+    fn beep(self) void;
+    fn boop(self) void;
+}
+
+const HalfImpl = struct {
+    pub fn beep(self: *HalfImpl) void {
+        _ = self;
+    }
+    // missing: boop
+};
+
+pub fn main() !void {
+    var impl = HalfImpl{};
+    const b: Beeper = Beeper.from(&impl);
+    _ = b;
+}

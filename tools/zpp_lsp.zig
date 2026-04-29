@@ -1,8 +1,8 @@
 //! Language Server for Zig++. Drives an LSP loop over stdin/stdout, surfacing
 //! diagnostics from the compiler frontend (E0001 owned-not-deinit, E0002
 //! use-after-move, E0003 owned-double-deinit, E0004 allocator mismatch,
-//! E0010 hidden allocation in noalloc functions) via the
-//! `textDocument/diagnostic` pull model.
+//! E0010 hidden allocation in noalloc functions, E0020 trait not implemented)
+//! via the `textDocument/diagnostic` pull model.
 //!
 //! Scope is intentionally minimal:
 //!   - `initialize` / `initialized`     : handshake
@@ -368,7 +368,7 @@ fn writeDiagnosticResponse(
     try writeFramed(file, body);
 }
 
-/// Run all five sema checks on `source`, render each finding as an LSP
+/// Run all six sema checks on `source`, render each finding as an LSP
 /// `Diagnostic`, and return the JSON array (e.g. `[{...},{...}]`). Caller
 /// owns the returned slice.
 fn renderDiagnostics(allocator: std.mem.Allocator, source: []const u8) ![]u8 {
@@ -382,13 +382,15 @@ fn renderDiagnostics(allocator: std.mem.Allocator, source: []const u8) ![]u8 {
     defer if (mismatch.len > 0) allocator.free(mismatch);
     const noalloc = checks.checkNoAlloc(allocator, source) catch &[_]checks.Finding{};
     defer if (noalloc.len > 0) allocator.free(noalloc);
+    const trait_impl = checks.checkTraitImpl(allocator, source) catch &[_]checks.Finding{};
+    defer if (trait_impl.len > 0) allocator.free(trait_impl);
 
     var out: std.ArrayListUnmanaged(u8) = .{};
     errdefer out.deinit(allocator);
     try out.append(allocator, '[');
 
     var first = true;
-    for ([_][]const checks.Finding{ own, move, double, mismatch, noalloc }) |group| {
+    for ([_][]const checks.Finding{ own, move, double, mismatch, noalloc, trait_impl }) |group| {
         for (group) |f| {
             if (!first) try out.append(allocator, ',');
             first = false;

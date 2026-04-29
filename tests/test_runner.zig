@@ -214,6 +214,9 @@ fn runDiagnostics(
     if (std.mem.eql(u8, code, "E0010")) {
         return runCheck(allocator, writer, src, "E0010", zpp_lib.checks.checkNoAlloc, "checkNoAlloc");
     }
+    if (std.mem.eql(u8, code, "E0020")) {
+        return runCheck(allocator, writer, src, "E0020", zpp_lib.checks.checkTraitImpl, "checkTraitImpl");
+    }
 
     try writer.print("SKIP (header ok; sema not yet implemented)\n", .{});
     return .skipped;
