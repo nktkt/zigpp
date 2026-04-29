@@ -1,0 +1,29 @@
+// expected stderr: tasks done\n
+const std = @import("std");
+const zpp = @import("zpp");
+
+fn worker(counter: *std.atomic.Value(u32)) void {
+    _ = counter.fetchAdd(1, .monotonic);
+}
+
+pub fn main() !void {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var counter = std.atomic.Value(u32).init(0);
+
+    var group = zpp.tasks.TaskGroup.init(allocator);
+    defer group.deinit();
+
+    try group.spawn(worker, .{&counter});
+    try group.spawn(worker, .{&counter});
+    try group.spawn(worker, .{&counter});
+    try group.join();
+
+    if (counter.load(.monotonic) == 3) {
+        std.debug.print("tasks done\n", .{});
+    } else {
+        std.debug.print("counter mismatch: {d}\n", .{counter.load(.monotonic)});
+    }
+}

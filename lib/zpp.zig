@@ -6,3 +6,5 @@
 pub const derive = @import("derive.zig");
 pub const owned = @import("owned.zig");
 pub const contracts = @import("contracts.zig");
+// `async` is a reserved keyword in Zig, so the field is named `tasks`.
+pub const tasks = @import("async.zig");
