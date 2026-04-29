@@ -59,6 +59,12 @@ jobs:
           echo "$out"
           echo "$out" | grep -q 'hello, zigpp!'
 
+      - name: smoke - zpp run examples/pipeline
+        run: |
+          out=$(./zig-out/bin/zpp run examples/pipeline 2>&1)
+          echo "$out"
+          echo "$out" | grep -q 'pipeline ok'
+
       - name: smoke - zpp check examples (must be clean)
         run: ./zig-out/bin/zpp check examples
 

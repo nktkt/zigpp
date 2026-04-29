@@ -1,0 +1,80 @@
+const std = @import("std");
+
+// Trait method signatures must match the impl signatures exactly: the
+// generated `Task.from(impl_ptr)` casts to `*ImplT` and forwards the call.
+trait Task {
+    fn name(self) []const u8;
+    fn run(self) anyerror!u32;
+}
+
+const Echo = struct {
+    label: []const u8,
+    val: u32,
+
+    pub fn name(self: *Echo) []const u8 {
+        return self.label;
+    }
+
+    pub fn run(self: *Echo) anyerror!u32 {
+        std.debug.print("> {s}\n", .{self.label});
+        return self.val;
+    }
+};
+
+const Doubler = struct {
+    inner: Task,
+    label: []const u8,
+
+    pub fn name(self: *Doubler) []const u8 {
+        return self.label;
+    }
+
+    pub fn run(self: *Doubler) anyerror!u32 {
+        std.debug.print("> {s}\n", .{self.label});
+        const v = try self.inner.run();
+        return v * 2;
+    }
+};
+
+// Exercises the derive postfix lowering. `Result` is intentionally unused
+// at runtime; the showcase is the lowered `pub const debug = ...` declaration.
+pub const Result = struct {
+    name: []const u8,
+    value: u32,
+} derive(.{ Debug });
+
+const Tag = struct {
+    label: []const u8,
+
+    pub fn deinit(self: *Tag) void {
+        _ = self;
+    }
+};
+
+// Effects annotation is stripped during lowering; it documents intent.
+effects(.noalloc)
+pub fn main() !void {
+    using scope = Tag{ .label = "pipeline" };
+
+    var echo = Echo{ .label = "echo", .val = 7 };
+    var doubler = Doubler{ .inner = Task.from(&echo), .label = "doubler" };
+
+    const tasks = [_]Task{
+        Task.from(&echo),
+        Task.from(&doubler),
+    };
+
+    // Checksum invariant: echo=7 plus doubler(echo)=14 must sum to 21.
+    var checksum: u32 = 0;
+    for (tasks) |t| {
+        const v = try t.run();
+        std.debug.print("= {s}={d}\n", .{ t.name(), v });
+        checksum +%= v;
+    }
+
+    if (checksum == 21) {
+        std.debug.print("pipeline ok\n", .{});
+    } else {
+        std.debug.print("pipeline fail (sum={d})\n", .{checksum});
+    }
+}
