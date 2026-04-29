@@ -19,6 +19,7 @@ pub const lower_to_zig = @import("lower_to_zig.zig");
 pub const migrate = @import("migrate.zig");
 pub const parser = @import("parser.zig");
 pub const project = @import("project.zig");
+pub const property = @import("property.zig");
 pub const sema = @import("sema.zig");
 pub const trait_lower = @import("trait_lower.zig");
 
