@@ -12,6 +12,7 @@ const diagnostics = zpp_lib.diagnostics;
 const ast = zpp_lib.ast;
 const project = zpp_lib.project;
 const checks = zpp_lib.checks;
+const init_proj = zpp_lib.init;
 
 const zpp_fmt = @import("zpp_fmt.zig");
 const zpp_lsp = @import("zpp_lsp.zig");
@@ -33,6 +34,7 @@ const help_text =
     \\  lower <file.zpp>    Print the generated .zig to stdout (debug aid)
     \\  fmt [--check] [path]   Whitespace-only format .zpp files; --check reports without writing
     \\  doc [path]          Generate a Markdown project reference under <path>/.zpp-doc/
+    \\  init <dir> [--force]    Scaffold a new Zig++ project at <dir>
     \\  migrate [--apply] [path]   Suggest (or apply) Zig -> Zig++ rewrites under <path>
     \\  lsp                 Start a Language Server speaking LSP over stdio
     \\  version             Print the zpp version string
@@ -73,6 +75,7 @@ pub fn main() !void {
     if (std.mem.eql(u8, sub, "lower")) return cmdLower(allocator, rest);
     if (std.mem.eql(u8, sub, "fmt")) return cmdFmt(allocator, rest);
     if (std.mem.eql(u8, sub, "doc")) return cmdDoc(allocator, rest);
+    if (std.mem.eql(u8, sub, "init")) return cmdInit(allocator, args, rest);
     if (std.mem.eql(u8, sub, "migrate")) return cmdMigrate(allocator, rest);
     if (std.mem.eql(u8, sub, "lsp")) return cmdLsp(allocator, rest);
 
@@ -326,4 +329,75 @@ fn cmdMigrate(allocator: std.mem.Allocator, args: []const []const u8) !void {
 fn cmdLsp(allocator: std.mem.Allocator, args: []const []const u8) !void {
     _ = args;
     try zpp_lsp.run(allocator);
+}
+
+fn cmdInit(
+    allocator: std.mem.Allocator,
+    full_args: []const []const u8,
+    args: []const []const u8,
+) !void {
+    var force = false;
+    var dir_path: ?[]const u8 = null;
+    var i: usize = 0;
+    while (i < args.len) : (i += 1) {
+        if (std.mem.eql(u8, args[i], "--force")) {
+            force = true;
+        } else if (dir_path == null) {
+            dir_path = args[i];
+        } else {
+            // TODO: switch to stderr writer once API stabilizes
+            std.debug.print("zpp init: unexpected argument: {s}\n", .{args[i]});
+            std.process.exit(2);
+        }
+    }
+
+    const path = dir_path orelse {
+        // TODO: switch to stderr writer once API stabilizes
+        std.debug.print("zpp init: missing <dir> argument\n", .{});
+        try printHelp();
+        std.process.exit(2);
+    };
+
+    const project_name = init_proj.projectNameFromPath(path);
+
+    init_proj.scaffold(allocator, path, project_name, force) catch |err| switch (err) {
+        error.DirNotEmpty => {
+            // TODO: switch to stderr writer once API stabilizes
+            std.debug.print(
+                "zpp init: {s} already exists and is not empty; pass --force to overwrite\n",
+                .{path},
+            );
+            std.process.exit(1);
+        },
+        else => {
+            // TODO: switch to stderr writer once API stabilizes
+            std.debug.print(
+                "zpp init: failed to scaffold {s}: {s}\n",
+                .{ path, @errorName(err) },
+            );
+            std.process.exit(1);
+        },
+    };
+
+    // Next-steps message. argv[0] is the binary path on most platforms.
+    // TODO: switch to stderr writer once API stabilizes
+    std.debug.print(
+        \\[zpp] scaffolded new project at {s}
+        \\  Next steps:
+        \\    1. Edit {s}/build.zig and set `lib_zpp_path` to your zigpp checkout's lib/zpp.zig
+        \\    2. cd {s}
+        \\    3. zpp run .
+        \\       (this lowers main.zpp -> .zpp-out/main.zig, then runs `zig build run`)
+        \\
+        \\
+    , .{ path, path, path });
+
+    if (full_args.len > 0) {
+        // TODO: switch to stderr writer once API stabilizes
+        std.debug.print(
+            \\  If `zpp` isn't on your PATH yet, the absolute path to this binary is:
+            \\    {s}
+            \\
+        , .{full_args[0]});
+    }
 }
